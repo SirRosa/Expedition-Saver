@@ -1,4 +1,4 @@
--- Expedition Saver v0.5.0-alpha | Grain Rot (Helden / UE4SS 3.x)
+-- Expedition Saver v0.5.1-quickslots-compat | Grain Rot (Helden / UE4SS 3.x)
 -- Host-authoritative only. This mod is EXPERIMENTAL; back up the save.
 -- The latest 2026-11-20 USMAP confirms fields and reflected signatures,
 -- not the exact native save/death sequence. Every mutation is checked.
@@ -1622,4 +1622,4 @@ hook("/Script/Engine.PlayerController:ClientRestart",
          S.coinLedger={}
          S.dropQueue={};S.destructionSeen={}
      end)
-log("v0.3.0-alpha loaded: live hook diagnostics and verified-reflection fixes")
+log("v0.5.1-quickslots-compat loaded: native 5-10 slot restore, Expedition respawn and payout")
