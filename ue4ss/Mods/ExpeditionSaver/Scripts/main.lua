@@ -315,23 +315,33 @@ local function heal(pawn)
     if not max or max<=0 or max>1000000 then return false end
     return put(stats,"CurrentHealth",max)
 end
-local function collectAtElevator(entry,dest)
+local function collectAtElevator(entry,dest,pawn)
     if not CFG.EnableItemRecovery then return end
-    local moved,lost=0,0
+    local moved,alreadyOwned,lost=0,0,0
+    local equipped={}
+    each(get(pawn,"EquipedItems"),function(item)
+        if valid(item) then equipped[path(item)]=true end
+    end)
     for i,r in ipairs(entry.gear) do
         local item=r.ref
         if valid(item) then
-            local at={X=dest.X+((i-1)%4)*55-75,Y=dest.Y+math.floor((i-1)/4)*55,Z=dest.Z+40}
-            -- The game owns inventory replication. Only reposition surviving
-            -- actors, so duplicate items and corrupt slot references are avoided.
-            pcall(function() item:DetachFromAll() end)
-            local ok=teleport(item,at)
-            if ok then moved=moved+1 else lost=lost+1 end
+            if equipped[path(item)] or get(item,"PreviousOwner")==pawn then
+                -- If the native respawn already re-equipped it, NEVER detach
+                -- that item. Preserve the game's correct replicated state.
+                alreadyOwned=alreadyOwned+1
+            else
+                local at={X=dest.X+((i-1)%4)*55-75,Y=dest.Y+math.floor((i-1)/4)*55,Z=dest.Z+40}
+                -- Only reposition surviving actor instances; never spawn copies.
+                pcall(function() item:DetachFromAll() end)
+                local ok=teleport(item,at)
+                if ok then moved=moved+1 else lost=lost+1 end
+            end
         else
             lost=lost+1
         end
     end
-    log("equipment recovery at lift: "..moved.." existing items moved, "..lost.." unavailable")
+    log("equipment: "..alreadyOwned.." native re-equipped, "..moved..
+        " moved to lift, "..lost.." lost/unavailable")
 end
 local function processDeaths(ctx)
     if not CFG.EnableRespawn then return end
@@ -351,7 +361,7 @@ local function processDeaths(ctx)
                 local at=respawnLocation()
                 if at and teleport(pawn,at) then
                     local healed=heal(pawn)
-                    collectAtElevator(entry,at)
+                    collectAtElevator(entry,at,pawn)
                     log("respawn in elevator "..key.."; healed="..tostring(healed))
                     S.pending[key]=nil
                     S.respawned=S.respawned+1
@@ -399,6 +409,9 @@ local function findCoinTarget(pc)
     if not target then return nil end
     -- Exactly Epic construct quality, no guessing based on material color.
     if enum(get(target,"ConstructQuality"))~=2 then return nil end
+    -- Don't destroy quest/puzzle requirements for an optional currency action.
+    if get(target,"bIsQuestObjective")==true or
+       get(target,"bRequireQuestObjectiveToKill")==true then return nil end
     local pdata
     local ok=pcall(function() pdata=target:GetInspectData() end)
     if not ok or not pdata or get(pdata,"bIsInDungeon")~=true then return nil end
