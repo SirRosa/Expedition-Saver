@@ -1,5 +1,110 @@
 # Grain Rot — Expedition Saver
 
+## v0.7.2 — Story loot diagnostics + reduced stutter (TEST)
+
+- **Story Mode:** destructible furniture can now pay Gold/Artifacts directly even when the actor's `GetWorld()` is unavailable at destruction. Only its known position/recipient wallet is needed.
+- Added a health-verified `HeldenConstructActor:DisableCollision_Multicast` destruction hook to supplement `HeldenPhysicsActor:OnHealthModifed` / `PlayDestructionEffect_Mulitcast`. Nonlethal collision changes do NOT award currency.
+- Additional reflected native Story loot sources: `HeldenTrashConstruct.RandomMoneySpawn` = `HeldenMoneyResource {Type,Amount}` (types 1=Gold, 2=Artifacts), subject to `MoneySpawnChance`; and `HeldenPhysicsActor.ResourceDropAmount`. Rewards configured only as Scraps do not fabricate other currencies.
+- `STORY LOOT DIAG` writes **at most 12 records** with actor, native reward, data source and money type to help identify unhandled furniture if it persists.
+- **Performance:** cache player controller searches for 3s, world-wide equipment registry searches for 9s, currency baseline scans for 9s at healthy HP / 1.2s at critical health, and post-death currency cleanup scans for at most once every 2.4s (plus immediate first scan), rather than every 300ms. Respawn polling remains 300ms.
+- Preserve native respawn and previous anti-duplication workflow; **currency baseline scans are less frequent and therefore protection against unrelated very recently spawned nearby coins is less conservative than before**. Back up saves. If a coin goes missing or duplication occurs, capture `UE4SS.log`.
+- Furniture Gold and Artifact Coins still go directly to the recognized attacker or nearest player, with **no mod-generated physical coin fallback**. Native scrap drops are unchanged.
+- The test suite uses mocked UE4SS, not Grain Rot itself. FPS, network replication, and complete Story mode coverage remain unconfirmed until real-game testing.
+
+
+## v0.7.1 — bez fizycznego dropu walut za meble (TEST)
+
+**W Story Mode i Expedition wszystkie Gold i Artifact Coins z niszczenia mebli są wpłacane bezpośrednio do portfela gracza.** Żaden przypadek nie wywołuje `SpawnActor` dla monet ani nie uruchamia ich fizyki.
+
+Kolejność wyboru odbiorcy:
+1. Gracz jednoznacznie wskazany przez zdarzenie trafienia.
+2. Jeden jednoznacznie rozpoznany atakujący bronią.
+3. **Gracz znajdujący się najbliżej zniszczonego obiektu** — bez limitu zasięgu i bez tolerancji odległości, nawet gdy różnica wynosi 1 mm lub mniej.
+
+Jeżeli odległość jest *dokładnie* taka sama, wygrywa stabilna kolejność pełnych nazw kontrolerów. Jeżeli brak dostępnej postaci lub odczyt pozycji/portfela jest chwilowo niemożliwy, nagroda pozostaje w kolejce i mod ponawia próbę. **Nie zamienia jej na fizyczny drop.** Log `DIRECT REWARD PENDING` oznacza zaległą wypłatę.
+
+To dotyczy dodatkowych monet i żetonów przy niszczeniu mebli. **Natywny drop scrapu oraz osobna procedura naprawy walut po śmierci nie zostały zmienione.** Nie są niszczone przedmioty ani ich fizyczne reprezentacje.
+
+CI sprawdza testy Lua/UE4SS (w tym różnicę 1 mm, remis, równoczesne ataki, chwilowy brak portfela, Story Mode). W prawdziwej grze wynik wymaga potwierdzenia.
+
+
+## v0.7.0 — Story + Expedition death/rewards (TEST BUILD)
+
+**This build handles Story (EHeldenGameMode.Default=0) AND Expedition (1).**
+- Shared native `RespawnCharacter_Server`, gear restoration and wallet recovery in BOTH modes.
+- Expedition still restores depth and unlocks its failure/elevator objects; these save mutations do **not** run in Story.
+- In Story without a DungeonElevator, native spawn location is preserved; if reviving the old pawn, use a PlayerStart or last known alive position.
+- Destroying furniture/physical treasure uses the same XP-multiplied/QOL table reward in Story, and credits Gold/Artifacts directly when the recipient is known.
+- In multiplayer, the recipient can be identified by native damage overlap, projectile damage, a recent `HeldenWeapon:Attack_Server`, or a unique melee-range player. Never pay two players or blindly assign an unresolved reward: fall back to the original physical Gold/Artifacts actor, with diagnostic `reason=unverified-coop` or `multiple-attackers`.
+- **Death duplication:** after restoring the wallet, scan only *new, very recent, nearby* `HeldenPhysicsCoin` actors from the death area, verify the coin's value is within the missing-drop budget, zero its `Money` and destroy the actor. Unlike v0.5.1, the currency drop need NOT match the exact entire Gold/Artifacts/Scraps wallet; partial drop is supported.
+- Never delete or alter `HeldenEquipableItem`, equipment actors, older floor coins, coins in other maps, or money before a safe wallet check. An unknown origin is inherently ambiguous; inspect log if some coins remain.
+
+**Acceptance test (host + client):**
+1. Back up save; replace previous ExpeditionSaver and QOL versions.
+2. Story: destroy a furniture item, check gold/tokens instantly and normal native scrap behavior; die, respawn, verify all gear and money.
+3. Expedition: repeat with both players close to the same furniture and test a confirmed hammer hit.
+4. After death check original site for duplicated currency and logs: `PLAYER DEATH queued`, `MONEY RESTORE`, `DEATH COINS REMOVED`/`DEATH COINS RESULT`, `DIRECT REWARD`, `DROP ... reason=`.
+5. Watch `PERF slow Expedition poll` events to correlate stalls. All CI tests are mocked UE4SS and cannot confirm runtime replication/FPS.
+
+**Test branch:** `fix/story-respawn-rewards-and-death-dup-v07`; separate from main.
+
+---
+
+
+## v0.6.0 — experimental direct reward and stutter reduction
+
+- When furniture or dungeon treasure is destroyed, credits its Gold / Artifact Coins directly to the verified player wallet, without spawning physics coin actors.
+- For solo play, uses the sole player. In co-op, requires an active damage-box overlap or projectile hit associated with that player in a short window. **Does not use the destructible actor's own GetInstigatorController as proof of killer**.
+- If co-op attribution is unavailable or ambiguous, physical money is retained instead of silently giving it to the wrong player or deleting the reward. Native scrap/resource drops stay unchanged.
+- Before direct payout, validates `Money` changes through a fresh readback; retains physical fallback when it cannot verify the credit.
+- Skips expensive full Expedition context lookups for non-lethal physics-health events and shares one global equipment scan across co-op players per 300-ms poll. `PERF slow Expedition poll CPU=...ms` logs costly cycles.
+- Carries the prior anti-duplication patch for money dropped at the player's death; **never deletes equipment actors**.
+- This is a GitHub Actions mock-tested experimental branch; actual damage attribution, HUD/replication, and stall improvements are not yet confirmed in Grain Rot.
+
+
+## v0.5.1-alpha — testowa poprawka duplikowania waluty po śmierci
+
+**Problem:** v0.5 przywracał `HeldenCharacter.Money` (Gold, Artifacts, Scraps)
+na nowym pawnie, ale natywna gra mogła pozostawić tę samą walutę w
+`HeldenPhysicsCoin` przy miejscu śmierci. Późniejsze podniesienie monet
+powodowało duplikację.
+
+**Poprawka (host, tylko Expedition):**
+- Zapamiętuje aktorów monet istniejących za życia gracza oraz ostatnie miejsce śmierci.
+- Po pomyślnym przywróceniu całego salda szuka wyłącznie **nowych,
+  świeżych aktorów `HeldenPhysicsCoin`** w promieniu 240 cm od miejsca śmierci,
+  w tym samym świecie.
+- Usuwa tylko **jednoznaczny zestaw monet**, którego suma Gold/Artifacts/Scraps
+  dokładnie odpowiada migawce utraconej waluty. Najpierw sprawdza saldo
+  nowej postaci, następnie zeruje kwotę w aktorze i weryfikuje zapis
+  do `Money`, a dopiero potem niszczy aktor monety.
+- **Nie dotyka `HeldenEquipableItem`, wyposażenia ani zwykłych przedmiotów na ziemi.**
+  Nie usuwa wcześniejszych, odległych, starych ani niejednoznacznych monet.
+- Nie dokłada hooka animacji; monitoring trwa tylko podczas aktywnego
+  problemu, a bazowe skanowanie monet odbywa się co cztery cykle timera.
+
+**Status: testy symulacyjne GitHub Actions przechodzą, działanie w grze niezweryfikowane.**
+Gdy gra używa innej klasy death drop lub rozdziela wypłatę inaczej,
+mod zapisze `DEATH COINS UNRESOLVED` i **nie skasuje niczego w ciemno**.
+Wtedy ryzyko duplikacji nadal istnieje; konieczny będzie log z gry.
+
+Pobierz testową paczkę `ExpeditionSaver-v0.5.1-death-currency-hotfix.zip`
+z [GitHub Actions](https://github.com/SirRosa/Expedition-Saver/actions)
+dla gałęzi `fix/death-currency-duplication`.
+Zainstaluj na hoście po wykonaniu kopii sejwa. Pozostałe funkcje
+v0.5 (respawn, odzyskiwanie itemów, wypłata loot, fizyka monet) pozostają.
+Przy równoczesnym QOL ustaw `InsuranceOnWipe=false`, aby osobny
+mechanizm ubezpieczenia nie dublował **przedmiotów**.
+
+**Test:** weź znane ilości wszystkich trzech walut oraz 1 przedmiot,
+zgiń, sprawdź saldo i ekwipunek po respawnie, następnie wróć do miejsca
+śmierci. Szukaj w `UE4SS.log` wpisów `DEATH COINS tracking`,
+`DEATH COINS matched=...` lub `DEATH COINS UNRESOLVED`.
+Poprawność musi obejmować również brak monet w miejscu śmierci i stan po
+zapisaniu/ponownym wczytaniu.
+
+---
+
 ## v0.5.0-alpha — ochrona ekwipunku, waluty, fizyka monet i skarby
 
 **Wydanie testowe** po analizie rzeczywistego logu `UE4SS(4).log` z v0.4.
