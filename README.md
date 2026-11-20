@@ -1,5 +1,19 @@
 # Grain Rot — Expedition Saver
 
+
+## v0.7.4 — poprawka oparta na rzeczywistym UE4SS(7).log
+
+**Potwierdzona przyczyna braku wypłat w Story Mode:** `GrainRotQuickJunk` w tym samym logu odczytał `GetPawn()=nil` i prawidłową postać w `HeldenPlayerController.LastPlayerChar`. Expedition Saver v0.7.3 uznawał odbiorcę tylko przez `GetPawn()`, przez co wypłaty 15 Gold dla doniczki, gramofonu i skrzynki trafiały do kolejki z `recipient=nil; reason=no-eligible-player`.
+
+Poprawka używa `LastPlayerChar` (oraz zapamiętanej żywej postaci) **tylko przy naliczaniu walut i przypisywaniu sprawcy**. Nie zmieniono dotychczasowego `currentPawn()` wykorzystywanego do natywnego respawnu. Sprawdza faktyczne pola `Money.Gold` i `Money.Artifacts` i stan żywego gracza. Najbliższy żywy odbiorca nadal wygrywa nawet przy 1 mm różnicy, bez fizycznych monet.
+
+**Stutter:** ten log pokazał 5649 wywołań starych hooków zdrowia przy zaledwie trzech rozpoznanych zniszczeniach, co było zbędną pracą. Zmieniono dublujący się pre/post na pojedyncze wywołanie po zmianie zdrowia oraz tani filtr `CurrentHealth <= 0` przed kosztownym pobieraniem kontekstu gry, nazw i skanowaniem obiektów.
+
+Przy braku odbiorcy w przyszłości mod zapisze maksymalnie cztery zestawy `REWARD OWNER TRACE`, pokazując `GetPawn`, `LastPlayerChar`, HP i waluty. To diagnostyka w chwili rzeczywistej próby wypłaty, nie cykliczne logowanie.
+
+Testy GitHub Actions odtwarzają rzeczywiste `GetPawn=nil` przy dostępnym `LastPlayerChar` (solo i co-op) oraz 5000 niegroźnych wywołań hooka. **To testy symulacyjne: w grze nadal potrzebne są testy FPS, wypłaty na portfel i repliki sieciowej.**
+
+
 ## v0.7.2 — Story loot diagnostics + reduced stutter (TEST)
 
 - **Story Mode:** destructible furniture can now pay Gold/Artifacts directly even when the actor's `GetWorld()` is unavailable at destruction. Only its known position/recipient wallet is needed.
