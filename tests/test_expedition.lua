@@ -311,7 +311,7 @@ test("AI character death is ignored",function()
     t.tick(2)
     assert(t.counts.respawn==0)
 end)
-test("hammer destruction automatically emits the original extraction values",function()
+test("hammer destruction deposits Gold and Artifacts directly into nearest wallet",function()
     local t=fixture();t.tick();t.destroyLoot();t.tick(1)
     assert(#t.spawned==0,"furniture must never generate physical coins")
     assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
@@ -352,7 +352,7 @@ test("no payout for zero coin value",function()
     assert(#t.spawned==0 and t.corpse.Money.Gold==80 and
         t.corpse.Money.Artifacts==4)
 end)
-test("missing physical currency asset cannot invent the reward",function()
+test("coin actor assets are irrelevant to wallet-only rewards",function()
     local t=fixture();t.tick()
     t.registry.HeldenDataSingleton.ArtifactCoinActorClass=nil
     t.registry.HeldenDataSingleton.GoldCoinActorClass=nil
@@ -547,7 +547,7 @@ test("poll detects player death without Die_Auth or OnPlayerKilled callbacks",fu
     t.tick(0)
     assert(t.newPawn.location and t.newPawn.location.Z==380)
 end)
-test("coin payout reports physical position above item, with visibility and replication",function()
+test("furniture currency never creates physics actors or coin meshes",function()
     local t=fixture();t.tick(0)
     t.destroyLoot();t.tick(0)
     assert(#t.spawned==0,"no actor/physics/gravity operations for furniture money")
@@ -865,7 +865,7 @@ test("victim actor instigator cannot steal payout from uniquely close player",fu
     assert(secondPawn.Money.Gold==5)
 end)
 
-test("ambiguous multiplayer leaves physical coin fallback instead of wrong wallet",function()
+test("ambiguous multiplayer awards nearest player without any physical coins",function()
     local t=fixture();t.tick(0)
     t.destroyLoot();t.tick(0)
     local second=t.listing.HeldenPlayerController[2]:GetPawn()
@@ -875,7 +875,7 @@ test("ambiguous multiplayer leaves physical coin fallback instead of wrong walle
     assert(second.Money.Gold==0 and second.Money.Artifacts==0)
 end)
 
-test("dead co-op partner is not treated as true single-player",function()
+test("dead co-op partner is excluded from eligible recipient positions",function()
     local t=fixture()
     local second=actor({_name="HeldenPlayerController /Game/DeadPartner"})
     local deadSoul=actor({_name="HeldenCharacterSoul /Game/Soul"})
@@ -887,7 +887,7 @@ test("dead co-op partner is not treated as true single-player",function()
         "only eligible living player gets the reward directly")
 end)
 
-test("two active damage sources make payout unassignable",function()
+test("two damage sources fall back to nearest player wallet",function()
     local t=fixture()
     local second=actor({_name="HeldenPlayerController /Game/P2"})
     local secondPawn=actor({_name="HeldenPlayerCharacter /Game/P2Pawn",
@@ -995,7 +995,7 @@ test("recent weapon attack identifies co-op killer even when both players stand 
     assert(pawn.Money.Gold==30 and pawn.Money.Artifacts==7)
 end)
 
-test("simultaneous weapon attacks from co-op players stay ambiguous",function()
+test("simultaneous weapon attacks fall back to nearest player with no drop",function()
     local t=fixture()
     local second=actor({_name="HeldenPlayerController /Game/OtherPlayer"})
     local pawn=actor({_name="HeldenPlayerCharacter /Game/OtherPawn",
