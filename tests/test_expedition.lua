@@ -534,4 +534,25 @@ test("possessed soul is never mistaken for a successfully respawned player",func
     assert(not soul.location,"soul must not be teleported to lift as player")
 end)
 
+test("OnRep Dead hook catches player death without native Die_Auth callback",function()
+    local t=fixture()
+    t.corpse.CharacterState=0;t.corpse.CharacterStats.CurrentHealth=120
+    t.tick(0)
+    local h=t.hooks["/Script/Helden.HeldenCharacter:OnRep_CharacterState"]
+    assert(h and h.pre,"replicated dead-state hook must be registered")
+    t.corpse.CharacterState=1;t.corpse.CharacterStats.CurrentHealth=0
+    h.pre(t.corpse)
+    t.tick(0)
+    assert(t.counts.respawn==1)
+end)
+test("end-of-run failure queues a tracked player even when original actor vanished",function()
+    local t=fixture()
+    t.corpse.CharacterState=0;t.corpse.CharacterStats.CurrentHealth=120
+    t.tick(0)
+    t.corpse._valid=false
+    t.run.State=3;t.run.Flags=1
+    t.tick(0)
+    assert(t.counts.respawn==1,"failed run must not require old Pawn still existing")
+end)
+
 print("ALL TESTS PASSED ("..passed..")")
