@@ -678,4 +678,69 @@ test("failed native pickup never destroys the only surviving item",function()
     assert(warned,"must not falsely report fully restored inventory")
 end)
 
+test("extra quickslot item restored to original slot 5 on new pawn",function()
+    local t=fixture()
+    -- Real HeldenInventroySlot structs contain SlotComponent, not
+    -- CurrentItemInSlot. The equipped actor carries CurrentInventorySlot.
+    local native={}
+    for i=1,10 do
+        native[i]=actor({_name="HeldenInventroySlot /Game/New"..i,
+            SlotComponent=actor({_name="Component /Game/NewQuickSlot"..i})})
+    end
+    t.newPawn.ItemSlots=native
+    local extra=actor({_name="HeldenEquipableItem /Game/ExtraGear",
+        CurrentInventorySlot=4,PreviousOwner=t.corpse,
+        DynamicSaveName="ExtraUnique_511",CurrentSlot=
+            actor({_name="Component /Game/OldQuickSlot5"})})
+    function extra:GetClass() return t.item:GetClass() end
+    function extra:DetachFromAll() self.CurrentSlot=nil end
+    function extra:SetSimulatePhysics(_) end
+    function extra:K2_TeleportTo(v) self.location=v;return true end
+    function extra:Interact(player)
+        self.PreviousOwner=player
+        self.CurrentInventorySlot=1 -- vanilla pickup would choose slot 2
+        self.CurrentSlot=native[2].SlotComponent
+        player.EquipedItems[#player.EquipedItems+1]=self
+    end
+    t.corpse.EquipedItems[#t.corpse.EquipedItems+1]=extra
+    t.listing.HeldenEquipableItem[#t.listing.HeldenEquipableItem+1]=extra
+    t.tick(0);t.killed()
+    for _=1,12 do t.tick(0) end
+    assert(extra.PreviousOwner==t.newPawn,
+        "native item must be reclaimed by new pawn")
+    assert(extra.CurrentInventorySlot==4,"quick slot 5 index must be preserved")
+    assert(extra.CurrentSlot==native[5].SlotComponent,
+        "original slot association must point to new-pawn component")
+    assert(#t.spawned==0,"never spawn duplicate equipped gear")
+end)
+test("respawn recovery waits until Quickslots builds 10 native components",function()
+    local t=fixture()
+    local extra=actor({_name="HeldenEquipableItem /Game/ExtraGear2",
+        CurrentInventorySlot=6,PreviousOwner=t.corpse,
+        DynamicSaveName="ExtraUnique_722",CurrentSlot=
+            actor({_name="Component /Game/OldQuickSlot7"})})
+    function extra:GetClass() return t.item:GetClass() end
+    function extra:DetachFromAll() self.CurrentSlot=nil end
+    function extra:SetSimulatePhysics(_) end
+    function extra:K2_TeleportTo(v) self.location=v;return true end
+    extra.Interact=t.item.Interact
+    t.corpse.EquipedItems[#t.corpse.EquipedItems+1]=extra
+    t.listing.HeldenEquipableItem[#t.listing.HeldenEquipableItem+1]=extra
+    t.tick(0);t.killed()
+    for _=1,8 do t.tick(0) end
+    assert(extra.PreviousOwner==t.corpse,
+        "must not force extra-slot gear into vanilla 2-slot inventory")
+    for i=3,10 do
+        t.newPawn.ItemSlots[i]=actor({_name="HeldenInventroySlot /Game/New"..i,
+            SlotComponent=actor({_name="Component /Game/Quick"..i})})
+    end
+    -- Real native slot struct lacks CurrentItemInSlot; the mock's pickup
+    -- uses first free slot, then compatibility code corrects its slot pointer.
+    for _=1,12 do t.tick(0) end
+    assert(extra.PreviousOwner==t.newPawn,
+        "must resume pickup once 10 slots are available")
+    assert(extra.CurrentInventorySlot==6 and
+        extra.CurrentSlot==t.newPawn.ItemSlots[7].SlotComponent)
+end)
+
 print("ALL TESTS PASSED ("..passed..")")
