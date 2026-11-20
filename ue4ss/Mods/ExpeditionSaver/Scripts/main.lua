@@ -1272,7 +1272,10 @@ local function observeClientRespawnAudio()
     -- already reports a fully alive replacement. Prefer the actually alive
     -- pawn, then the newer confirmed OnNewPawn target, then LastPlayerChar.
     local pawnStats=character(pawn) and get(pawn,"CharacterStats")
-    local pawnHp=tonumber(get(pawnStats,"CurrentHealth"))
+    local pawnHealthRaw=get(pawnStats,"CurrentHealth")
+    -- get() may return zero Lua values on a missing GetPawn. tonumber()
+    -- requires an explicit argument, even if nil.
+    local pawnHp=tonumber(pawnHealthRaw)
     local pawnState=enum(get(pawn,"CharacterState"))
     local pawnAlive=character(pawn) and not isSoul and pawnHp and
         pawnHp>0 and pawnState~=1
@@ -1289,7 +1292,8 @@ local function observeClientRespawnAudio()
     end
 
     local stats=char and get(char,"CharacterStats")
-    local hp=tonumber(get(stats,"CurrentHealth"))
+    local healthRaw=get(stats,"CurrentHealth")
+    local hp=tonumber(healthRaw)
     local state=enum(get(char,"CharacterState"))
     local isDead=isSoul or state==1 or (hp and hp<=0)
     local isAlive=character(char) and not isDead and hp and hp>0
