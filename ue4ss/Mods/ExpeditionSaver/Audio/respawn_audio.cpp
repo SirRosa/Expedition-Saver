@@ -42,7 +42,7 @@ extern "C" __declspec(dllexport) int __cdecl luaopen_RespawnSound(void* /*lua_st
     const size_t remaining = (sizeof(fullPath) / sizeof(fullPath[0]))
         - static_cast<size_t>(separator + 1 - fullPath);
     if (remaining < sizeof(wavName) / sizeof(wavName[0])) return 0;
-    std::wcscpy(separator + 1, wavName);
+    std::wmemcpy(separator + 1, wavName, sizeof(wavName) / sizeof(wchar_t));
 
     // Async WinMM returns immediately; playback happens in the current
     // process without creating a console/window or freezing the game thread.
