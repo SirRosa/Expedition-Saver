@@ -1,0 +1,28 @@
+name: Inspect actor instigator reflection
+on:
+  push:
+    branches: [feature/direct-rewards-performance]
+    paths: ['.github/workflows/inspect-instigator.yml']
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  reflection:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect UFunction signature and instigator properties
+        run: |
+          set -euo pipefail
+          base=https://raw.githubusercontent.com/SirRosa/Grain-Rot-Mod-Data-Base/main/data
+          for n in 01 02 03 04 05 06; do curl -fsSL "$base/UE4SS-ObjectDump.txt.gz.part$n" -o "/tmp/part$n"; done
+          cat /tmp/part0* | gzip -dc > /tmp/objects.txt
+          echo '=== OnHealthModifed ==='
+          grep -F '/Script/Helden.HeldenPhysicsActor:OnHealthModifed' /tmp/objects.txt || true
+          echo '=== Damage-related Helden actor functions ==='
+          grep -Ei 'Function /Script/Helden\.[^ :]+:(.*Damage.*|.*Health.*|.*Hit.*|.*Instigator.*|.*Destroyed.*|.*Attack.*)' /tmp/objects.txt | head -140 || true
+          echo '=== Actor instigator methods ==='
+          grep -E 'Function /Script/Engine.Actor:(GetInstigator|GetOwner|SetInstigator|GetGameTimeSinceCreation|GetDistanceTo)' /tmp/objects.txt || true
+          echo '=== PhysicsActor actor properties ==='
+          grep -E '(Property /Script/Helden.HeldenPhysicsActor:|Property /Script/Helden.HeldenStatsComponent:)' /tmp/objects.txt | head -180 || true
+          echo '=== Function params for damage and health ==='
+          grep -Ei '(Property /Script/Helden\.[^ :]+:[^ ]*(OnHealthModifed|OnHealthModified|HealthModified|ApplyDamage|TakeDamage|Attack|OnDeath)[^ :]*:)' /tmp/objects.txt | head -100 || true
+          echo '=== End ==='
