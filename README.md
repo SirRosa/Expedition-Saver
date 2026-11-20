@@ -1,5 +1,16 @@
 # Grain Rot — Expedition Saver
 
+## v0.7.6 — Re:Zero return-by-death: dźwięk hosta **i klienta**
+
+- Podmieniono źródło audio na dokładny WAV użytkownika (1,886 s, stereo, 44,1 kHz, PCM16). Plik **jest dostarczony w pełnym ZIP-ie instalacyjnym**, a nie w publicznym kodzie GitHub.
+- **Host:** odtwarza po potwierdzonym normalnym respawnie albo wskrzeszeniu starej postaci. Bez zmian w autorytatywnym respawnie, walutach i ekwipunku.
+- **Klient:** niezależnie wykrywa odrodzenie **swojej lokalnej** postaci w Story/Expedition przez `IsLocalController()`, przejście żywy→martwy→żywy, `LastPlayerChar` przy `GetPawn()==nil`, `OnNewPawn` i replikowane `OnRep_CharacterState`. Nie wywołuje respawnu na serwerze ani nie zmienia stanu rozgrywki.
+- Aby efekt działał w co-op, **zainstaluj ExpeditionSaver wraz z folderem Audio na komputerze hosta i każdego klienta**. Odtwarzanie odbywa się lokalnie w Windows i nie wymaga transmitowania pliku audio przez sieć.
+- Brak dźwięku przy pierwszym dołączeniu/załadowaniu zapisu, bez potwierdzonej śmierci albo przy respawnie innego gracza.
+- Skompilowany pomocnik Win64 `respawn_audio.exe` (WinMM) jest wywoływany poza wątkiem gry. Opcja `EnableRespawnSound = true`.
+- Testy GitHub Actions używają symulowanych zdarzeń UE4SS oraz kompilują Windows helper. **Odtwarzanie na dwóch rzeczywistych komputerach nie zostało jeszcze potwierdzone.**
+
+
 
 ## v0.7.4 — poprawka oparta na rzeczywistym UE4SS(7).log
 
