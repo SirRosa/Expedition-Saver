@@ -1350,18 +1350,42 @@ local function processDropQueue()
         if true then
             local done=true
             if job.gold>0 and not job.goldDone then
-                job.goldDone=spawnMoney(job.world,job.at,goldClass,job.gold,"Gold")
-                if job.goldDone then
-                    log("DROP gold="..job.gold.." "..job.key)
-                else done=false end
+                if valid(job.recipient) and not job.goldDirectTried then
+                    job.goldDirectTried=true
+                    job.goldDone=creditReward(job.recipient,"Gold",job.gold)
+                    if job.goldDone then
+                        log("DIRECT REWARD Gold="..job.gold..
+                            " to="..tostring(path(job.recipient))..
+                            " via="..job.recipientSource)
+                    end
+                end
+                if not job.goldDone then
+                    job.goldDone=spawnMoney(job.world,job.at,goldClass,job.gold,"Gold")
+                    if job.goldDone then
+                        log("DROP gold="..job.gold.." "..job.key..
+                            " reason="..tostring(job.recipientSource))
+                    else done=false end
+                end
             end
             if job.artifacts>0 and not job.artifactDone then
-                local offset={X=job.at.X+65,Y=job.at.Y,Z=job.at.Z+25}
-                job.artifactDone=spawnMoney(job.world,offset,artifactClass,
-                    job.artifacts,"Artifacts")
-                if job.artifactDone then
-                    log("DROP artifacts="..job.artifacts.." "..job.key)
-                else done=false end
+                if valid(job.recipient) and not job.artifactsDirectTried then
+                    job.artifactsDirectTried=true
+                    job.artifactDone=creditReward(job.recipient,"Artifacts",job.artifacts)
+                    if job.artifactDone then
+                        log("DIRECT REWARD Artifacts="..job.artifacts..
+                            " to="..tostring(path(job.recipient))..
+                            " via="..job.recipientSource)
+                    end
+                end
+                if not job.artifactDone then
+                    local offset={X=job.at.X+65,Y=job.at.Y,Z=job.at.Z+25}
+                    job.artifactDone=spawnMoney(job.world,offset,artifactClass,
+                        job.artifacts,"Artifacts")
+                    if job.artifactDone then
+                        log("DROP artifacts="..job.artifacts.." "..job.key..
+                            " reason="..tostring(job.recipientSource))
+                    else done=false end
+                end
             end
             if done or job.attempts>=10 then
                 if not done then
@@ -1722,8 +1746,10 @@ hook("/Script/Helden.HeldenPhysicsActor:OnHealthModifed",
      safePre("health post",function(context) destructionEvent(context,"health") end))
 hook("/Script/Helden.HeldenPhysicsActor:PlayDestructionEffect_Mulitcast",
      safePre("destruction",function(context) destructionEvent(context,"effect") end))
+local lastSlowPoll=-1000
 local function safePoll(onTimer)
-    local now=os.clock()
+    local started=os.clock()
+    local now=started
     -- The engine-thread delayed loop already throttles callbacks. os.clock
     -- measures CPU time on Windows and must NOT gate that loop; otherwise
     -- pauses/slow frames can postpone a respawn until after party wipe.
@@ -1734,6 +1760,13 @@ local function safePoll(onTimer)
     S.lastPoll=now
     retryHooks()
     local ok,err=pcall(poll)
+    local finished=os.clock()
+    if finished-started>=CFG.SlowPollWarnSeconds and
+       finished-lastSlowPoll>=5 then
+        lastSlowPoll=finished
+        log(string.format("PERF slow Expedition poll CPU=%.1fms",
+            (finished-started)*1000))
+    end
     if not ok and not S.warned then
         S.warned=true;log("poll error: "..tostring(err))
     end
