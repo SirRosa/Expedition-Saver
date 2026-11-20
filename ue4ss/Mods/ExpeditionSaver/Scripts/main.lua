@@ -1,4 +1,4 @@
--- Expedition Saver v0.7.0 story + expedition respawn and currency | Helden / UE4SS 3.x
+-- Expedition Saver v0.7.1 nearest-player rewards (wallet only) | Helden / UE4SS 3.x
 -- Host-authoritative only. This mod is EXPERIMENTAL; back up the save.
 -- The latest 2026-11-20 USMAP confirms fields and reflected signatures,
 -- not the exact native save/death sequence. Every mutation is checked.
@@ -18,7 +18,7 @@ local CFG = {
     DeathCoinMaxAgeSeconds = 30,
     DeathCoinScanTicks = 100, -- watch currency drops for 30 seconds
     EnableNoPermadeath = true,
-    EnablePhysicalCoins = true,
+    EnablePhysicalCoins = false, -- furniture rewards NEVER spawn physical currency
     DirectFurnitureRewards = true, -- wallet credit to verified or uniquely close destroyer
     RewardNearbyPlayerRadius = 280, -- 2.8 m, solo melee reach only
     SlowPollWarnSeconds = 0.035,
@@ -1284,59 +1284,81 @@ local function recordAttackIntent(weapon)
     end
 end
 
+-- Find the closest currently living player with a wallet. No maximum range:
+-- even a 0.001 cm difference wins. Exact distance ties use the controller
+-- full name to guarantee deterministic host-side attribution.
+local function nearestPlayerAt(at)
+    local best,bestDistance,bestId
+    local sole,eligible,unknownPositions=nil,0,0
+    for _,pc in ipairs(all("HeldenPlayerController")) do
+        if valid(pc) then
+            local pawn=currentPawn(pc)
+            if valid(pawn) and get(pawn,"Money")~=nil then
+                eligible=eligible+1
+                if eligible==1 then sole=pawn end
+                local pos=location(pawn)
+                if pos and at then
+                    local dist=distance2(pos,at)
+                    local id=path(pc) or ""
+                    if not best or dist<bestDistance or
+                       (dist==bestDistance and id<bestId) then
+                        best,bestDistance,bestId=pawn,dist,id
+                    end
+                else
+                    unknownPositions=unknownPositions+1
+                end
+            end
+        end
+    end
+    if eligible==1 and valid(sole) then return sole,"sole-player" end
+    if eligible==0 then return nil,"no-eligible-player" end
+    if not at or unknownPositions>0 then
+        return nil,"player-position-unavailable"
+    end
+    if valid(best) then return best,"nearest-player" end
+    return nil,"no-valid-position"
+end
+
 local function selectDestroyer(actor,origin)
     if not CFG.DirectFurnitureRewards then return nil,"disabled" end
     local key=path(actor)
     local hit=key and S.damageHits[key] or nil
     local recent=hit and S.pollCycle-hit.tick<=2
-    local sole,chosen,players,eligible=nil,nil,0,0
-    local close,closeCount=nil,0
-    local attacking,attackerCount=nil,0
-    local at=location(actor)
-    local rangeSq=CFG.RewardNearbyPlayerRadius^2
-    for _,pc in ipairs(all("HeldenPlayerController")) do
-        if valid(pc) then
-            players=players+1
-            local pawn=currentPawn(pc)
-            if valid(pawn) and get(pawn,"Money") then
-                eligible=eligible+1
-                if eligible==1 then sole=pawn end
-                if recent and not hit.ambiguous and path(pc)==hit.player then
-                    chosen=pawn
-                end
-                if origin=="health" and at then
-                    local pos=location(pawn)
-                    if pos and distance2(pos,at)<=rangeSq then
-                        closeCount=closeCount+1
-                        if closeCount==1 then close=pawn end
-                        local attack=S.attackIntents[path(pc)]
-                        if attack and S.pollCycle-attack.tick<=2 then
-                            attackerCount=attackerCount+1
-                            if attackerCount==1 then attacking=pawn end
-                        end
-                    end
+    if recent and not hit.ambiguous then
+        for _,pc in ipairs(all("HeldenPlayerController")) do
+            if valid(pc) and path(pc)==hit.player then
+                local pawn=currentPawn(pc)
+                if valid(pawn) and get(pawn,"Money")~=nil then
+                    return pawn,"verified-"..hit.kind
                 end
             end
         end
     end
-    if valid(chosen) then return chosen,"verified-"..hit.kind end
-    if attackerCount==1 and valid(attacking) and
-       not (recent and hit.ambiguous) then
-        return attacking,"recent-weapon-attack"
+    -- A unique recent active weapon attack is useful evidence, even if
+    -- another player is a millimetre closer. Multiple attackers are not.
+    local at=location(actor)
+    local attacker,count=nil,0
+    if at then
+        for _,pc in ipairs(all("HeldenPlayerController")) do
+            if valid(pc) then
+                local pawn=currentPawn(pc)
+                local attack=S.attackIntents[path(pc)]
+                local pos=location(pawn)
+                if valid(pawn) and get(pawn,"Money")~=nil and pos and
+                   distance2(pos,at)<=CFG.RewardNearbyPlayerRadius^2 and
+                   attack and S.pollCycle-attack.tick<=2 then
+                    attacker,count=pawn,count+1
+                end
+            end
+        end
     end
-    if attackerCount>1 then return nil,"multiple-attackers" end
-    -- If another player is dead, do not treat this as a solo session.
-    if players==1 and eligible==1 and valid(sole) then
-        return sole,"single-player"
+    if count==1 and valid(attacker) then
+        return attacker,"recent-weapon-attack"
     end
-    -- When only one living player is close enough to physically strike the
-    -- actor, attribute a lethal health event to that player. Never pick
-    -- simply the nearest of two nearby teammates.
-    if players>1 and eligible>=2 and closeCount==1 and
-       valid(close) and not (recent and hit.ambiguous) then
-        return close,"unique-close-melee"
-    end
-    return nil,players>1 and "unverified-coop" or "no-owner"
+    -- Explicit user preference: nearest payer ALWAYS wins when no uniquely
+    -- confirmed attacker exists, no matter how small the distance margin.
+    local nearest,reason=nearestPlayerAt(at)
+    return nearest,reason
 end
 
 local function creditReward(pawn,currency,amount)
@@ -1430,161 +1452,47 @@ local function destructionEvent(ctx,origin)
     log("DESTRUCTION queued "..key.." gold="..value.gold.." artifacts="..
         value.artifacts.." source="..value.source.." from="..origin)
 end
-local function spawnMoney(world,position,actorClass,amount,currency)
-    if not valid(world) or not valid(actorClass) or amount<=0 then return false end
-    -- Spawn above destroyed furniture so collision/physics can't bury the
-    -- item inside the floor. v0.3 spawned at the old actor's pivot.
-    local coinPosition={X=position.X,Y=position.Y,Z=position.Z+55}
-    local ok,coin=pcall(function()
-        return world:SpawnActor(actorClass,coinPosition,{Pitch=0,Yaw=0,Roll=0})
-    end)
-    if not ok or not valid(coin) then
-        log("COIN SPAWN FAILED "..currency.." x"..amount.." error="..tostring(coin))
-        return false
-    end
-    local money=get(coin,"Money")
-    if not money then
-        pcall(function() coin:K2_DestroyActor() end)
-        return false
-    end
-    local success=put(money,"Gold",currency=="Gold" and amount or 0)
-        and put(money,"Artifacts",currency=="Artifacts" and amount or 0)
-        and put(money,"Scraps",0)
-    -- Check the *actor's own* struct again; success on a Lua copy isn't enough.
-    local actual=get(coin,"Money")
-    success=success and number(get(actual,currency),0,CFG.MaxCoinsPerDrop)==amount
-        and number(get(actual,"Scraps"),0,CFG.MaxCoinsPerDrop)==0
-        and number(get(actual,currency=="Gold" and "Artifacts" or "Gold"),
-            0,CFG.MaxCoinsPerDrop)==0
-    if not success then
-        -- Fallback for UScriptStruct wrappers returned as detached copies.
-        pcall(function()
-            coin.Money={
-                Gold=currency=="Gold" and amount or 0,
-                Artifacts=currency=="Artifacts" and amount or 0,
-                Scraps=0
-            }
-        end)
-        local actual2=get(coin,"Money")
-        success=number(get(actual2,currency),0,CFG.MaxCoinsPerDrop)==amount
-            and number(get(actual2,"Scraps"),0,CFG.MaxCoinsPerDrop)==0
-            and number(get(actual2,currency=="Gold" and "Artifacts" or "Gold"),
-                0,CFG.MaxCoinsPerDrop)==0
-        if not success then
-            pcall(function() coin:K2_DestroyActor() end)
-            log("COIN INITIALIZATION FAILED "..currency.." x"..amount)
-            return false
-        end
-    end
-    -- Validating a UStruct does not prove the actor is visible/pickable.
-    -- Enable standard Actor visibility, collision and replication, then
-    -- read its final position back for evidence in a real UE4SS log.
-    local replicated=pcall(function() coin:SetReplicates(true) end)
-    local visible=pcall(function() coin:SetActorHiddenInGame(false) end)
-    local collision=pcall(function() coin:SetActorEnableCollision(true) end)
-    pcall(function() coin:K2_SetActorLocation(coinPosition,false,{},true) end)
-    local actualPosition=location(coin)
-    local mesh=get(coin,"RootMesh")
-    local meshVisible,simulatesPhysics,hasGravity
-    if valid(mesh) then
-        -- A visible collidable actor without simulating mesh is static. v0.4
-        -- forgot SetSimulatePhysics/SetEnableGravity, so coins hung in air.
-        put(coin,"bCanSimulatePhysics",true)
-        pcall(function() mesh:SetMobility(2) end) -- Movable
-        pcall(function() mesh:SetVisibility(true,true) end)
-        pcall(function() mesh:SetCollisionEnabled(3) end)
-        local physicsOk,physicsErr=pcall(function() mesh:SetSimulatePhysics(true) end)
-        local gravityOk,gravityErr=pcall(function() mesh:SetEnableGravity(true) end)
-        pcall(function() mesh:WakeAllRigidBodies() end)
-        pcall(function() coin:ForceNetUpdate() end)
-        pcall(function() meshVisible=mesh:IsVisible() end)
-        pcall(function() simulatesPhysics=mesh:IsSimulatingPhysics() end)
-        pcall(function() hasGravity=mesh:IsGravityEnabled() end)
-        if not physicsOk or not gravityOk or simulatesPhysics==false then
-            log("COIN PHYSICS ERROR "..currency.." simulateCall="..tostring(physicsOk)..
-                " gravityCall="..tostring(gravityOk)..
-                " simulated="..tostring(simulatesPhysics)..
-                " simulateError="..tostring(physicsErr)..
-                " gravityError="..tostring(gravityErr))
-        end
-    end
-    S.coinsLocated=S.coinsLocated+1
-    if S.coinsLocated<=25 then
-        local klass
-        pcall(function() klass=coin:GetClass() end)
-        log("COIN PHYSICAL "..currency.." x"..amount..
-            " class="..tostring(path(klass))..
-            " pos="..(actualPosition and
-                (string.format("%.0f,%.0f,%.0f",
-                    actualPosition.X,actualPosition.Y,actualPosition.Z)) or "UNKNOWN")..
-            " replicatedCall="..tostring(replicated)..
-            " unhiddenCall="..tostring(visible)..
-            " collisionCall="..tostring(collision)..
-            " meshVisible="..tostring(meshVisible)..
-            " simulatesPhysics="..tostring(simulatesPhysics)..
-            " gravity="..tostring(hasGravity))
-    end
-    return true
-end
+-- Furniture / extraction currency is wallet-only. No actor spawning,
+-- mesh physics, collision, or physical Gold/Artifacts fallback.
 local function processDropQueue()
     if #S.dropQueue==0 or not onHost() then return end
-    local ds=getDataSingleton()
-    if not ds then return end
-    local goldClass=get(ds,"GoldCoinActorClass")
-    local artifactClass=get(ds,"ArtifactCoinActorClass")
     for i=#S.dropQueue,1,-1 do
         local job=S.dropQueue[i]
         job.attempts=(job.attempts or 0)+1
-        -- This runs on the *next* 300ms engine-thread tick. No CPU-time
-        -- delay: the v0.2 delay used os.clock and could stall drops.
-        if true then
-            local done=true
+        if not valid(job.recipient) or get(job.recipient,"Money")==nil then
+            job.recipient,job.recipientSource=nearestPlayerAt(job.at)
+        end
+        local receiver=job.recipient
+        if valid(receiver) then
             if job.gold>0 and not job.goldDone then
-                if valid(job.recipient) and not job.goldDirectTried then
-                    job.goldDirectTried=true
-                    job.goldDone=creditReward(job.recipient,"Gold",job.gold)
-                    if job.goldDone then
-                        log("DIRECT REWARD Gold="..job.gold..
-                            " to="..tostring(path(job.recipient))..
-                            " via="..job.recipientSource)
-                    end
-                end
-                if not job.goldDone then
-                    job.goldDone=spawnMoney(job.world,job.at,goldClass,job.gold,"Gold")
-                    if job.goldDone then
-                        log("DROP gold="..job.gold.." "..job.key..
-                            " reason="..tostring(job.recipientSource))
-                    else done=false end
+                job.goldDone=creditReward(receiver,"Gold",job.gold)
+                if job.goldDone then
+                    log("DIRECT REWARD Gold="..job.gold..
+                        " to="..tostring(path(receiver))..
+                        " via="..tostring(job.recipientSource))
                 end
             end
             if job.artifacts>0 and not job.artifactDone then
-                if valid(job.recipient) and not job.artifactsDirectTried then
-                    job.artifactsDirectTried=true
-                    job.artifactDone=creditReward(job.recipient,"Artifacts",job.artifacts)
-                    if job.artifactDone then
-                        log("DIRECT REWARD Artifacts="..job.artifacts..
-                            " to="..tostring(path(job.recipient))..
-                            " via="..job.recipientSource)
-                    end
-                end
-                if not job.artifactDone then
-                    local offset={X=job.at.X+65,Y=job.at.Y,Z=job.at.Z+25}
-                    job.artifactDone=spawnMoney(job.world,offset,artifactClass,
-                        job.artifacts,"Artifacts")
-                    if job.artifactDone then
-                        log("DROP artifacts="..job.artifacts.." "..job.key..
-                            " reason="..tostring(job.recipientSource))
-                    else done=false end
+                job.artifactDone=creditReward(receiver,"Artifacts",job.artifacts)
+                if job.artifactDone then
+                    log("DIRECT REWARD Artifacts="..job.artifacts..
+                        " to="..tostring(path(receiver))..
+                        " via="..tostring(job.recipientSource))
                 end
             end
-            if done or job.attempts>=10 then
-                if not done then
-                    log("WARNING partial/unpaid extraction reward: "..job.key..
-                        " goldDone="..tostring(job.goldDone)..
-                        " artifactsDone="..tostring(job.artifactDone))
-                end
-                table.remove(S.dropQueue,i)
-            end
+        end
+        if (job.gold<=0 or job.goldDone) and
+           (job.artifacts<=0 or job.artifactDone) then
+            table.remove(S.dropQueue,i)
+        elseif job.attempts%20==0 then
+            -- Keep pending rewards in memory until a real wallet can be
+            -- credited; never replace them with physical currency.
+            log("DIRECT REWARD PENDING actor="..tostring(job.key)..
+                " GoldPending="..tostring(not job.goldDone)..
+                " ArtifactsPending="..tostring(not job.artifactDone)..
+                " recipient="..tostring(path(receiver))..
+                " reason="..tostring(job.recipientSource)..
+                " attempts="..job.attempts.." (NO PHYSICAL DROP)")
         end
     end
 end
@@ -2044,4 +1952,4 @@ hook("/Script/Engine.PlayerController:ClientRestart",
          S.coinLedger={}
          S.dropQueue={};S.destructionSeen={}
      end)
-log("v0.7.0 STORY+EXPEDITION active: direct reward, respawn, partial death-coin dedup")
+log("v0.7.1 STORY+EXPEDITION active: direct nearest-player rewards (NO PHYSICAL DROP)")
