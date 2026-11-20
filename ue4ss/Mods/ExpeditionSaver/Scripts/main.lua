@@ -1100,7 +1100,7 @@ local function lootValue(actor)
     local inspected
     local inspectedZero
     pcall(function() inspected=actor:GetInspectData() end)
-    if inspected and get(inspected,"bIsInDungeon")==true then
+    if inspected and (get(inspected,"bIsInDungeon")==true or S.mode==0) then
         local value=get(inspected,"Value")
         if value then
             local gold=number(get(value,"Gold"),0,CFG.MaxCoinsPerDrop) or 0
@@ -1215,7 +1215,8 @@ local function ownerController(source)
 end
 
 local function recordDamage(target,pc,kind)
-    if S.phase~=2 or not valid(target) or not valid(pc) or
+    if not (S.mode==0 or S.phase==2) or
+       not valid(target) or not valid(pc) or
        not valid(get(target,"StatsComponent")) then return end
     local key,player=path(target),path(pc)
     if not key or not player then return end
@@ -1295,7 +1296,7 @@ local function destructionEvent(ctx,origin)
             " host="..tostring(onHost()))
     end
     -- Reject the common nonlethal hits before expensive reflected context.
-    if S.phase~=2 or not valid(a) then return end
+    if not (S.mode==0 or S.phase==2) or not valid(a) then return end
     local stats=get(a,"StatsComponent")
     if not valid(stats) then return end
     if origin=="health" then
@@ -1304,7 +1305,10 @@ local function destructionEvent(ctx,origin)
     end
     if not onHost() then return end
     local gameCtx=game()
-    if not gameCtx or gameCtx.phase~=2 then return end
+    if not gameCtx or not
+       (gameCtx.isStory or (gameCtx.isExpedition and gameCtx.phase==2)) then
+        return
+    end
     if get(a,"bIsQuestObjective")==true or
        get(a,"bRequireQuestObjectiveToKill")==true then return end
     -- Require an actual in-dungeon loot actor; never pay for built furniture.
@@ -1312,7 +1316,7 @@ local function destructionEvent(ctx,origin)
     local inspecting
     pcall(function() inspecting=a:GetInspectData() end)
     local inDungeon=inspecting and get(inspecting,"bIsInDungeon")==true
-    if not inDungeon and not valid(owning) then
+    if not gameCtx.isStory and not inDungeon and not valid(owning) then
         if S.rawDestroyEvents<=10 then
             log("DROP SKIP: no valid dungeon origin for "..tostring(path(a)))
         end
@@ -1512,7 +1516,8 @@ end
 -- machine. v0.3 never touched BP_ExpeditionFailed_Actor_C; it remained solid
 -- even after GameState flags were cleared (confirmed by live object dump).
 local function repairFailedDoor(ctx)
-    if not CFG.EnableNoPermadeath or not S.recoveryRequired then return end
+    if not ctx.isExpedition or not CFG.EnableNoPermadeath or
+       not S.recoveryRequired then return end
     if ctx.phase==1 or ctx.phase==2 then return end
     local observed=0
     for _,barrier in ipairs(all("BP_ExpeditionFailed_Actor_C")) do
@@ -1563,7 +1568,8 @@ local function repairFailedDoor(ctx)
 end
 
 local function repairElevator(ctx)
-    if not CFG.EnableNoPermadeath or not S.recoveryRequired then return end
+    if not ctx.isExpedition or not CFG.EnableNoPermadeath or
+       not S.recoveryRequired then return end
     if ctx.phase==1 or ctx.phase==2 then return end
     local now=os.clock()
     S.machineRepairCycle=S.machineRepairCycle+1
@@ -1667,33 +1673,40 @@ local function poll()
             " failureChecks="..S.failureChecks)
     end
     if not ctx then
-        if S.lastMode~="nonexpedition" then
-            S.lastMode="nonexpedition"
-            log("inactive: missing authoritative Expedition context")
+        if S.lastMode~="no-context" then
+            S.lastMode="no-context"
+            log("inactive: missing authoritative Story/Expedition context")
         end
         return
     end
-    S.lastMode="expedition"
+    S.lastMode=ctx.isStory and "story" or "expedition"
     local md=get(ctx.save,"MetaData")
     local slot=number(get(md,"GameSlot"),0,100)
     if not slot then return end
     local key=path(ctx.save)
-    if S.slot~=slot or S.saveKey~=key then resetForSave(ctx,key,slot) end
-    keepExpedition(ctx)
+    if S.slot~=slot or S.saveKey~=key or S.mode~=ctx.mode then
+        resetForSave(ctx,key,slot)
+    end
+    S.mode=ctx.mode
+    if ctx.isExpedition then keepExpedition(ctx) end
     monitorPlayers(ctx)
     processDeaths(ctx)
     processInventoryRecoveries()
     processCurrencyCleanup()
-    repairElevator(ctx)
-    repairFailedDoor(ctx)
+    if ctx.isExpedition then
+        repairElevator(ctx)
+        repairFailedDoor(ctx)
+    end
     processDropQueue()
-    if ctx.phase==1 or ctx.phase==2 then
+    if ctx.isExpedition and (ctx.phase==1 or ctx.phase==2) then
         if S.phase==0 or S.phase==3 then
             cache["HeldenDungeonElevator"]=nil
         end
     end
     if S.phase~=ctx.phase then
-        log("run state "..tostring(S.phase).." -> "..ctx.phase.."; depth="..S.depth)
+        log((ctx.isStory and "Story" or "Expedition")..
+            " run state "..tostring(S.phase).." -> "..ctx.phase..
+            "; depth="..S.depth)
     end
     S.phase=ctx.phase
 end
@@ -1859,7 +1872,7 @@ if CFG.DirectFurnitureRewards then
     hook("/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin",
         safePre("damage overlap",function(component,overlap,otherActor)
             local box=unwrap(component)
-            if S.phase~=2 or not valid(box) or
+            if not (S.mode==0 or S.phase==2) or not valid(box) or
                get(box,"bDamageActive")~=true then return end
             local source
             pcall(function() source=box:GetOwner() end)
@@ -1867,7 +1880,7 @@ if CFG.DirectFurnitureRewards then
         end))
     hook("/Script/Helden.HeldenProjectile:OnDamagedActor",
         safePre("projectile hit",function(projectile,overlap,otherActor)
-            if S.phase~=2 then return end
+            if not (S.mode==0 or S.phase==2) then return end
             local source=unwrap(projectile)
             local pc
             if valid(source) then
