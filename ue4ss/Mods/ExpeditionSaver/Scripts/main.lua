@@ -1,4 +1,4 @@
--- Expedition Saver v0.3.0-alpha | Grain Rot (Helden / UE4SS 3.x)
+-- Expedition Saver v0.4.0-alpha | Grain Rot (Helden / UE4SS 3.x)
 -- Host-authoritative only. This mod is EXPERIMENTAL; back up the save.
 -- The latest 2026-11-20 USMAP confirms fields and reflected signatures,
 -- not the exact native save/death sequence. Every mutation is checked.
@@ -8,7 +8,7 @@ local CFG = {
     MaxDepth = 10000,
     EnableRespawn = true,
     EnableItemRecovery = true,
-    RestoreDestroyedItems = true,
+    RestoreDestroyedItems = false, -- avoid QOL insurance duplicate spawns until verified
     MaxGearPerPlayer = 60,
     EnableNoPermadeath = true,
     EnablePhysicalCoins = true,
@@ -80,7 +80,9 @@ local function enum(v)
     if s:find("ElevatorRideDown",1,true) then return 1 end
     if s:find("Epic",1,true) then return 2 end
     if s:find("Failed",1,true) then return 1 end
+    if s:find("Dead",1,true) then return 1 end
     if s:find("None",1,true) or s:find("Default",1,true) then return 0 end
+    return nil -- important: tostring(enum(...)) must receive a value
 end
 local function failure(v)
     local n=enum(v)
@@ -191,7 +193,8 @@ local S={
     lastHeartbeat=-1000,lastGuard=nil,recoveryRequired=false,
     nextMachineRepair=0,machineRepairAttempts=0,
     dropQueue={},destructionSeen={},dropAttempt=0,
-    deathEvents=0,newPawnEvents=0,rewardEvents=0,rawDeathEvents=0,rawDestroyEvents=0,heartbeatTicks=1000,machineRepairCycle=1000
+    deathEvents=0,newPawnEvents=0,rewardEvents=0,rawDeathEvents=0,rawDestroyEvents=0,heartbeatTicks=1000,machineRepairCycle=1000,
+    players={},observedDeaths=0,failedBarriers=0,coinsLocated=0
 }
 local function backupFile(slot)
     if not CFG.BackupFile then return nil end
