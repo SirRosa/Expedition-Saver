@@ -41,7 +41,7 @@ local function fixture()
     local gs=actor({_name="HeldenGameState /Game/GS",GameModeType=1,bExpeditionFailed=false,
         CurrentDungeonRun=run})
     function gs:OnRep_DungeonRunState() self.repCount=(self.repCount or 0)+1 end
-    local stats=actor({CurrentHealth=0,TotalStats={MaxHealth=120}})
+    local stats=actor({CurrentHealth=120,TotalStats={MaxHealth=120}})
     local corpse=actor({_name="HeldenCharacter /Game/Old",EquipedItems={},CharacterStats=stats,
         Money={Gold=80,Artifacts=4,Scraps=17},ItemSlots={}})
     local newPawn=actor({_name="HeldenPlayerCharacter /Game/New",CharacterStats=
@@ -206,6 +206,8 @@ local function fixture()
         killed=function()
             local h=hooks["/Script/Helden.HeldenCharacter:Die_Auth"]
             assert(h and h.pre)
+            corpse.CharacterStats.CurrentHealth=0
+            corpse.CharacterState=1
             h.pre(corpse)
         end,
         destroyLoot=function(direct)
