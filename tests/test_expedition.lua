@@ -162,7 +162,7 @@ local function fixture()
         return coin
     end
     local listing={HeldenPlayerController={pc},HeldenEquipableItem={item},
-        BP_ExpeditionFailed_Actor_C={barrier}}
+        BP_ExpeditionFailed_Actor_C={barrier},HeldenPhysicsCoin={}}
     local clockcb
     local fakeio={open=function(fname,mode)
         if mode=="r" then
@@ -676,6 +676,106 @@ test("failed native pickup never destroys the only surviving item",function()
         if line:find("floor_or_missing=1",1,true) then warned=true end
     end
     assert(warned,"must not falsely report fully restored inventory")
+end)
+
+-- Death currency cleanup scenarios use real currency actors (not item actors).
+local function makeCoin(t,id,money,x,age,world)
+    local c=actor({_name="HeldenPhysicsCoin /Game/"..id,Money=money})
+    function c:K2_GetActorLocation()
+        return {X=x or 1010,Y=2000,Z=300}
+    end
+    function c:GetGameTimeSinceCreation() return age or 0.5 end
+    function c:GetWorld() return world or t.world end
+    function c:K2_DestroyActor() self._valid=false;self.destroyed=true end
+    t.listing.HeldenPhysicsCoin[#t.listing.HeldenPhysicsCoin+1]=c
+    return c
+end
+
+test("exact native death drop of all three currencies is consumed once",function()
+    local t=fixture()
+    t.tick(0);t.killed()
+    local gold=makeCoin(t,"death_gold",{Gold=80,Artifacts=0,Scraps=0})
+    local artifacts=makeCoin(t,"death_artifact",{Gold=0,Artifacts=4,Scraps=0},1020)
+    local scrap=makeCoin(t,"death_scrap",{Gold=0,Artifacts=0,Scraps=17},1030)
+    for _=1,8 do t.tick(0) end
+    assert(t.newPawn.Money.Gold==80 and t.newPawn.Money.Artifacts==4 and
+           t.newPawn.Money.Scraps==17,"wallet must survive")
+    assert(gold.destroyed and artifacts.destroyed and scrap.destroyed,
+           "all strictly matched death currency must be removed")
+    assert(gold.Money.Gold==0 and artifacts.Money.Artifacts==0 and
+           scrap.Money.Scraps==0,"currency must be zeroed before removal")
+    assert(t.item:IsValid(),"physical equipment must never be destroyed")
+    for _=1,10 do t.tick(0) end
+    assert(t.newPawn.Money.Gold==80 and t.newPawn.Money.Artifacts==4,
+           "repeated ticks must not add currency")
+end)
+
+test("pre-existing money on floor remains untouched even if value matches",function()
+    local t=fixture()
+    local existing=makeCoin(t,"old_coin",
+        {Gold=80,Artifacts=4,Scraps=17})
+    t.corpse.CharacterState=0
+    t.corpse.CharacterStats.CurrentHealth=120
+    for _=1,4 do t.tick(0) end
+    t.corpse.CharacterState=1
+    t.corpse.CharacterStats.CurrentHealth=0
+    for _=1,9 do t.tick(0) end
+    assert(existing:IsValid() and not existing.destroyed,
+           "pre-existing physical currency is not a native death drop")
+    assert(existing.Money.Gold==80)
+    assert(t.newPawn.Money.Gold==80)
+end)
+
+test("partial nearby currency cannot be deleted by approximate matching",function()
+    local t=fixture()
+    t.tick(0);t.killed()
+    local near=makeCoin(t,"unrelated_gold",
+        {Gold=40,Artifacts=4,Scraps=17})
+    for _=1,9 do t.tick(0) end
+    assert(near:IsValid() and near.Money.Gold==40)
+    assert(t.newPawn.Money.Gold==80)
+end)
+
+test("stale death-area coins cannot be removed",function()
+    local t=fixture()
+    t.tick(0);t.killed()
+    local stale=makeCoin(t,"stale_gold",
+        {Gold=80,Artifacts=4,Scraps=17},1010,30)
+    for _=1,9 do t.tick(0) end
+    assert(stale:IsValid() and stale.Money.Gold==80)
+end)
+
+test("distant fresh coins cannot be mistaken for native death drop",function()
+    local t=fixture()
+    t.tick(0);t.killed()
+    local other=makeCoin(t,"remote_gold",
+        {Gold=80,Artifacts=4,Scraps=17},2000)
+    for _=1,9 do t.tick(0) end
+    assert(other:IsValid() and other.Money.Gold==80)
+end)
+
+test("currency must not be destroyed if respawned pawn has no valid wallet",function()
+    local t=fixture()
+    t.newPawn.Money=nil
+    t.tick(0);t.killed()
+    local gold=makeCoin(t,"not_funded",
+        {Gold=80,Artifacts=4,Scraps=17})
+    for _=1,9 do t.tick(0) end
+    assert(gold:IsValid() and not gold.destroyed)
+    assert(gold.Money.Gold==80)
+    assert(t.item:IsValid())
+end)
+
+test("fresh same-value currency from a different world must not be removed",function()
+    local t=fixture()
+    function t.corpse:GetWorld() return t.world end
+    t.tick(0);t.killed()
+    local otherWorld=actor({_name="World /Game/Other"})
+    local elsewhere=makeCoin(t,"other_world",
+        {Gold=80,Artifacts=4,Scraps=17},1010,0.5,otherWorld)
+    for _=1,9 do t.tick(0) end
+    assert(elsewhere:IsValid() and not elsewhere.destroyed)
+    assert(t.newPawn.Money.Gold==80)
 end)
 
 print("ALL TESTS PASSED ("..passed..")")
