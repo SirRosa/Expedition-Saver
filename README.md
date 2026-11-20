@@ -1,47 +1,47 @@
-# Expedition Saver — rozpoznanie API gry
+# Grain Rot — Expedition Saver
 
-**Stan: diagnostyka, nie ukończony mod zmieniający rozgrywkę.** Dostępne mapowanie Helden z 5 września 2026 r. jest starsze od trybu Expedition dodanego w patchu 1.1 (24 września 2026 r.). Nie należy na jego podstawie zgadywać metod serwerowej obsługi śmierci i permadeath.
+**v0.1.0-alpha | testowa wersja moda UE4SS | tylko tryb Expedition i host.**
 
-## Docelowe zachowanie
+Kod powstał na podstawie pliku mapowań wygenerowanego 20 listopada 2026 r. oraz pełnego zrzutu refleksji. **Zaliczone testy GitHub Actions symulują grę, nie potwierdzają działania w rzeczywistej sesji.** Wykonaj kopię zapisu.
 
-- Po śmierci w Expedition: odrodzenie w windzie, pełny ekwipunek bez upuszczania przedmiotów ani duplikacji.
-- Po porażce całej wyprawy: brak permadeath, zachowanie zapisu ekspedycji i możliwość kontynuacji od ostatniego osiągniętego piętra.
-- Fioletowy loot: akcja przetworzenia przedmiotu na miejscu, po której na ziemię wypadają **fizyczne Artifact Coins** zgodnie z realną wartością przedmiotu, bez natychmiastowego dopisywania żetonów do portfela.
+## Funkcje
 
-### Potwierdzone wskazówki ze starego USMAP
+| Żądana funkcja | Stan implementacji i ograniczenia |
+|---|---|
+| Respawn po śmierci w windzie | Przechwytuje serwerową śmierć gracza, następnie próbuje wywołać natywne `RespawnCharacter_Server`, przenieść nową postać do windy i przywrócić zdrowie. Nie działa poza Expedition. Nie jest jeszcze potwierdzone, że gra zezwala na takie odrodzenie po śmierci ostatniego gracza. |
+| Ekwipunek po odrodzeniu | Zachowuje referencje do istniejących przedmiotów. Te automatycznie wyposażone przez grę pozostawia nietknięte. Pozostałe *nadal istniejące* przedmioty próbuje przenieść do windy. **Nie odtwarza przedmiotów, które silnik już zniszczył**, i nie gwarantuje ponownego wyposażenia w slotach. To jeszcze nie jest pełna, potwierdzona realizacja „wszystkie itemki”. |
+| Koniec permadeath i ostatnie piętro | Próbuje nadpisać wynik `HasFailedExpedition`, wyczyścić trwałe flagi porażki i przywrócić najwyższe `DungeonLevel`. Ma pomocniczą, lokalną kopię głębokości per slot. Nie modyfikuje aktywnego seeda wygenerowanej mapy. Nie ma jeszcze testu powrotu z końca ekspedycji w grze. |
+| Fioletowy loot → fizyczne Artifact Coins | Na hoście naciśnij **F7** przy trzymanym albo wskazywanym przedmiocie klasy Epic. Wymagane są dodatnie `GetInspectData().Value.Artifacts`, bliskość i dostępna `ArtifactCoinActorClass`. Najpierw tworzy fizyczny żeton i weryfikuje wartość, a dopiero potem próbuje zniszczyć oryginał. Brak bezpośredniego dodawania żetonów do portfela. Pomija wskazane flagi questowe. Niepotwierdzone w multiplayer i nie gwarantuje atomowej transakcji, jeśli gra nadpisze aktora żetonu. |
 
-- HeldenDataSingleton.ArtifactCoinActorClass — referencja do klasy fizycznego żetonu.
-- HeldenPhysicsCoin.Money — struktura nagrody.
-- HeldenMoney.Artifacts — ilość żetonów.
-- HeldenCoinDispenser — istniejąca mechanika wydawania monet.
+## Instalacja
 
-Przed implementacją przetworzenia należy zidentyfikować **funkcję gry**, która odpowiada za przyznawanie Artifact Coins z konkretnego lootu i niszczenie lootu. Sama klasa monety nie wystarczy do bezpiecznego przyznania waluty w multiplayer. Preferowana ścieżka: wykorzystać wbudowany mechanizm wydawania monet / grindera i jego replikację; jeżeli API nie pozwoli, przygotować atomową transakcję hosta z kontrolą duplikacji.
+1. Zrób **kopię zapisu gry** przed pierwszym uruchomieniem.
+2. Pobierz `ExpeditionSaver-v0.1.0-alpha.zip` z artefaktów ostatniego udanego przebiegu [GitHub Actions](https://github.com/SirRosa/Expedition-Saver/actions).
+3. Rozpakuj do `Grain Rot\Helden\Binaries\Win64\`. Powinno powstać `ue4ss\Mods\ExpeditionSaver\Scripts\main.lua` oraz `enabled.txt`. Nie instaluj kolejnego UE4SS.
+4. Gra z innymi osobami: instalacja **wyłącznie u hosta**. Przycisk F7 działa na hoście. Nie ma jeszcze klient-serwer RPC do zdalnego użycia tej funkcji.
+5. **Na pierwsze testy wyłącz Depth Keeper i QOL**, gdyż oba mogą modyfikować głębokość lub odzyskiwanie wyposażenia i utrudnią analizę.
 
-## Aktualizacja 2026-11-20 — mapowania otrzymane
+Mod `ExpeditionMapper` pozostaje w repozytorium jako **osobne, tylko diagnostyczne narzędzie**. Nie jest potrzebny do uruchomienia Expedition Saver i nie znajduje się w paczce gameplay.
 
-Użytkownik przekazał poprawny USMAP o **automatycznej nazwie** `Helden-5.7.4-51494982+++UE5+Release-5.7-1c1a1497.usmap`, obok `UE4SS_ObjectDump.txt` i `UE4SS(1).log`. Log potwierdza `Mappings Generation Completed Successfully!`.
+## Pierwszy test w grze (na kopii zapisu)
 
-Nowy zrzut zawiera `EHeldenGameMode.Expedition`, `HeldenGameState.HasFailedExpedition`, `HeldenPlayerController.RespawnCharacter_Server`, `HeldenSaveGame.MetaData.bHasFailed` i klasy fizycznych Artifact Coins. **Nie trzeba ponownie generować zrzutu.** Szczegółowe wyniki w [docs/mapping-analysis-2026-11-20.md](docs/mapping-analysis-2026-11-20.md).
+1. Otwórz Expedition i sprawdź, czy w `ue4ss\UE4SS.log` jest wpis `[ExpeditionSaver] v0.1.0-alpha loaded`. Jeżeli znajdziesz `hook unavailable`, `poll error` albo `respawn timed out`, zachowaj log.
+2. Z jednym tanim przedmiotem sprawdź respawn po śmierci, pozycję postaci, przedmiot na miejscu i aktualny stan gry.
+3. Osobno przetestuj śmierć całej drużyny i ponowne uruchomienie ekspedycji — nie wystarczy, że sam wyświetlacz pokazuje ostatnie piętro.
+4. W Expedition zbliż się do fioletowego lootu z **wartością Artifact Coins większą od zera**, złap go lub wskaż i naciśnij F7. Sprawdź fizyczny żeton na ziemi oraz to, czy oryginał zniknął. Nie testuj na unikatowym/przedmiocie questowym.
+5. Po sesji prześlij `UE4SS.log`, jeśli któraś funkcja nie zadziała lub itemy znikną.
 
-**Nadal do weryfikacji:** kolejność serwerowych zdarzeń śmierci i zapisu oraz bezpieczne wystawianie monet w trakcie wyprawy. To nie jest jeszcze wersja moda zmieniająca rozgrywkę.
+## Bezpieczeństwo i szczegóły techniczne
 
-## Zdobądź aktualną mapę za pomocą UE4SS
+- UE4SS v3: niezależny timer `LoopAsync` przekazuje sprawdzenia na główny wątek za pomocą `ExecuteInGameThread`. Jeśli timer jest niedostępny, działa awaryjny hook animacji.
+- Nie zmienia zachowania poza Expedition; przy braku autorytatywnego `GameModeBase` pozostaje bezczynny.
+- Nie tworzy kopii ekwipunku po śmierci; zapobiega przypadkowej duplikacji, ale nie daje jeszcze gwarancji zachowania wszystkich slotów.
+- Nie niszczy fioletowego przedmiotu, jeżeli nie uda się stworzyć i zainicjalizować fizycznej monety; próbuje wycofać monetę, jeśli niszczenie przedmiotu zawiedzie.
+- Lokalna kopia głębokości: `%LOCALAPPDATA%\Helden\Saved\ExpeditionSaver_slotN.txt`. Jest pomocnicza, a nie zamiennikiem save'u gry.
+- Przedmioty Quest, odmienne reprezentacje fioletowej rzadkości i numeryczne enumy innej wersji gry wymagają oddzielnej walidacji.
 
-W repo znajduje się tymczasowy, **tylko diagnostyczny** mod ExpeditionMapper.
+## Badania
 
-1. Pobierz paczkę ExpeditionMapper z GitHub Actions i rozpakuj do katalogu Grain Rot/Helden/Binaries/Win64/.
-2. Uruchom zaktualizowaną grę i wejdź **do trybu Expedition**, najlepiej do windy, aby załadować związane z nim klasy.
-3. Wciśnij **F8**: UE4SS wykona DumpUSMAP i zapisze plik **Helden-*.usmap** (nazwa zależy od buildu; NIE `Mappings.usmap`).
-4. Wciśnij **F9**: UE4SS wykona DumpAllObjects i zapisze UE4SS_ObjectDump.txt (lista załadowanych obiektów i funkcji).
-5. W katalogu Grain Rot/Helden/Binaries/Win64/ue4ss/ lub obok Helden-Win64-Shipping.exe znajdź oba pliki. Ścieżkę sprawdzisz też w UE4SS.log.
-6. Prześlij oba pliki i UE4SS.log w rozmowie. Nie ma potrzeby dołączania plików gry ani całego pakietu UE4SS.
+[Szczegółowy raport o zrzucie klas i funkcji](docs/mapping-analysis-2026-11-20.md).
 
-**Alternatywa bez helpera:** UE4SS standardowo ma klawisz Ctrl + Num6 do mapowań oraz Ctrl + J do zrzutu obiektów; w niestandardowych konfiguracjach skróty mogą być niedostępne.
-
-Dumper działa wyłącznie na żądanie. Nie wywołuje modyfikacji zapisu ani aktorów gry. Tworzenie zrzutów może chwilowo zamrozić grę — wykonaj je w menu lub w bezpiecznej lokalizacji.
-
-## Ograniczenia
-
-Nie mam bezpośredniego dostępu do plików gry na komputerze użytkownika ani nie mogę uruchomić Grain Rot we własnym kontenerze. Nowe mapowania muszą pochodzić z aktualnie uruchomionego procesu lub z wiarygodnej publicznej kopii dla tej samej wersji. Zautomatyzowałem ich generowanie po uruchomieniu gry, ale **nie mogę wygenerować ich zdalnie** bez procesu gry.
-
-Po otrzymaniu aktualnych mapowań następnym krokiem będzie identyfikacja natywnych funkcji serwera: koniec ekspedycji, odrodzenie, zapis ekwipunku, numery pięter i przetwarzanie artefaktów.
+Testy w `tests/test_expedition.lua` działają w symulowanym API i nie uruchamiają Unreal Engine ani sieci multiplayer.
