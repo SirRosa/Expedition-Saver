@@ -1274,12 +1274,15 @@ local function recordDamage(target,pc,kind)
     end
 end
 
-local function selectDestroyer(actor)
+local function selectDestroyer(actor,origin)
     if not CFG.DirectFurnitureRewards then return nil,"disabled" end
     local key=path(actor)
     local hit=key and S.damageHits[key] or nil
     local recent=hit and S.pollCycle-hit.tick<=2
     local sole,chosen,players,eligible=nil,nil,0,0
+    local close,closeCount=nil,0
+    local at=location(actor)
+    local rangeSq=CFG.RewardNearbyPlayerRadius^2
     for _,pc in ipairs(all("HeldenPlayerController")) do
         if valid(pc) then
             players=players+1
@@ -1290,6 +1293,13 @@ local function selectDestroyer(actor)
                 if recent and not hit.ambiguous and path(pc)==hit.player then
                     chosen=pawn
                 end
+                if origin=="health" and at then
+                    local pos=location(pawn)
+                    if pos and distance2(pos,at)<=rangeSq then
+                        closeCount=closeCount+1
+                        if closeCount==1 then close=pawn end
+                    end
+                end
             end
         end
     end
@@ -1297,6 +1307,12 @@ local function selectDestroyer(actor)
     -- If another player is dead, do not treat this as a solo session.
     if players==1 and eligible==1 and valid(sole) then
         return sole,"single-player"
+    end
+    -- When only one living player is close enough to physically strike the
+    -- actor, attribute a lethal health event to that player. Never pick
+    -- simply the nearest of two nearby teammates.
+    if players>1 and closeCount==1 and valid(close) then
+        return close,"unique-close-melee"
     end
     return nil,players>1 and "unverified-coop" or "no-owner"
 end
@@ -1384,7 +1400,7 @@ local function destructionEvent(ctx,origin)
         return
     end
     S.destructionSeen[key]=true
-    local recipient,ownership=selectDestroyer(a)
+    local recipient,ownership=selectDestroyer(a,origin)
     S.dropQueue[#S.dropQueue+1]={world=world,at=at,key=key,
         gold=value.gold,artifacts=value.artifacts,source=value.source,
         recipient=recipient,recipientSource=ownership,
