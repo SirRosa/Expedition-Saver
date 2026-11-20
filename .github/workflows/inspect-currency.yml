@@ -28,16 +28,6 @@ jobs:
           echo '=== SCHEMA MONEY / DEATH FIELDS ==='
           curl -fsSL --retry 2 "$base/current-schema.json.gz" -o /tmp/current-schema.json.gz
           gzip -dc /tmp/current-schema.json.gz > /tmp/schema.json
-          python3 - <<'PY'
-import json
-j=json.load(open('/tmp/schema.json'))
-print('ROOT KEYS',str(list(j)[:12]))
-if isinstance(j,dict):
-  for k,v in j.items():
-    if 'struct' in k.lower():
-      print('STRUCT ROOT',k, 'TYPE',type(v).__name__)
-      print('HEAD',str(v)[:1200])
-      break
-PY
+          python3 -c "import json; j=json.load(open('/tmp/schema.json')); print('ROOT KEYS:',list(j)[:12]); print('SAMPLE:',str(j)[:2400])"
           echo '=== DUMP samples ==='
           head -n 12 /tmp/objects.txt
