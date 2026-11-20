@@ -566,17 +566,23 @@ local function collectAtElevator(entry,dest,pawn)
 end
 local function isOriginalItemAlreadyPresent(pawn,rec)
     if not valid(pawn) then return false end
-    local refs,byClass=snapshotNativeGear(pawn)
+    local refs=snapshotNativeGear(pawn)
     if refs[rec.key] then return true end
-    -- The game sometimes rebuilds objects with a different UObject path.
-    -- For this case, use strict dynamic save name when available; never
-    -- assume that one sword substitutes two distinct swords.
+    -- Do not scan all world items for every saved item. Only the receiving
+    -- pawn's inventory can prove that an item was actually restored.
     local dynamic=rec.dynamicSaveName
     if dynamic and dynamic~="None" and dynamic~="" then
-        for _,item in ipairs(all("HeldenEquipableItem")) do
-            if valid(item) and ownsItem(pawn,item) and
-                asName(get(item,"DynamicSaveName"))==dynamic then return true end
+        local found=false
+        local function match(item)
+            if valid(item) and asName(get(item,"DynamicSaveName"))==dynamic then
+                found=true
+            end
         end
+        each(get(pawn,"EquipedItems"),match)
+        each(get(pawn,"ItemSlots"),function(slot)
+            match(get(slot,"CurrentItemInSlot"))
+        end)
+        if found then return true end
     end
     if rec.slotIdx~=nil and rec.classPath then
         -- If the native engine rebuilt the same slot with the same class,
