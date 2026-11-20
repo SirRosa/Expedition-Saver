@@ -1,4 +1,4 @@
--- Expedition Saver v0.7.1 nearest-player rewards (wallet only) | Helden / UE4SS 3.x
+-- Expedition Saver v0.7.3 Story currency + reduced registry scans | UE4SS 3.x
 -- Host-authoritative only. This mod is EXPERIMENTAL; back up the save.
 -- The latest 2026-11-20 USMAP confirms fields and reflected signatures,
 -- not the exact native save/death sequence. Every mutation is checked.
@@ -26,7 +26,7 @@ local CFG = {
     CoinCriticalHealthFraction = 0.35,
     CoinCriticalEveryPolls = 4, -- keep frequent baseline checks near death
     GearFullScanPolls = 30, -- world-wide inventory scan only every 9s
-    PlayerControllerScanPolls = 10, -- cached small controller list for 3s
+    PlayerControllerScanPolls = 100, -- cache live controllers for up to 30s; invalidate on new pawn
     DeathCoinScanEveryPolls = 8, -- 2.4s between full scans while recovering
     RespawnDelaySeconds = 0.15,
     RespawnRetrySeconds = 1.5,
@@ -621,15 +621,20 @@ local function gearOf(char,forceFresh)
     local owner=path(char)
     -- At most one UObject-wide equipment scan per game-thread poll,
     -- shared by all co-op players. An actual death requests a fresh list.
-    if forceFresh or S.gearScanTick<0 or
-       S.pollCycle-S.gearScanTick>=CFG.GearFullScanPolls then
+    -- Story inventory is already available from EquipedItems and ItemSlots.
+    -- The full UObject registry query was freezing frames every nine seconds.
+    -- The death path still performs ONE forced scan to recover unusual slots.
+    if forceFresh or (S.mode==1 and
+       (S.gearScanTick<0 or S.pollCycle-S.gearScanTick>=CFG.GearFullScanPolls)) then
         S.gearScanTick=S.pollCycle
         S.gearScanObjects=all("HeldenEquipableItem")
     end
-    for _,item in ipairs(S.gearScanObjects) do
-        if valid(item) and path(get(item,"PreviousOwner"))==owner and
-           valid(get(item,"CurrentSlot")) then
-            add(item,"PreviousOwner")
+    if forceFresh or S.mode==1 then
+        for _,item in ipairs(S.gearScanObjects) do
+            if valid(item) and path(get(item,"PreviousOwner"))==owner and
+               valid(get(item,"CurrentSlot")) then
+                add(item,"PreviousOwner")
+            end
         end
     end
     table.sort(result,function(a,b)
@@ -1734,7 +1739,7 @@ local function poll()
     local host=onHost()
     local ctx=host and game()
     S.heartbeatTicks=S.heartbeatTicks+1
-    if S.heartbeatTicks>=20 then
+    if S.heartbeatTicks>=120 then
         S.heartbeatTicks=0
         local gs=first("HeldenGameState")
         local gi=first("HeldenGameInstance")
@@ -1754,7 +1759,8 @@ local function poll()
             " destructionEvents="..S.rewardEvents..
             " rawDestructions="..S.rawDestroyEvents..
             " playerControllers="..#playerControllers()..
-            " failureDoors="..#all("BP_ExpeditionFailed_Actor_C")..
+            " failureDoors="..(ctx and ctx.isExpedition and
+                #all("BP_ExpeditionFailed_Actor_C") or 0)..
             " failureChecks="..S.failureChecks)
     end
     if not ctx then
@@ -1960,15 +1966,10 @@ if CFG.DirectFurnitureRewards then
         safePre("weapon attack",function(weapon)
             recordAttackIntent(unwrap(weapon))
         end))
-    hook("/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin",
-        safePre("damage overlap",function(component,overlap,otherActor)
-            local box=unwrap(component)
-            if not (S.mode==0 or S.phase==2) or not valid(box) or
-               get(box,"bDamageActive")~=true then return end
-            local source
-            pcall(function() source=box:GetOwner() end)
-            recordDamage(unwrap(otherActor),ownerController(source),"active-melee-overlap")
-        end))
+    -- OnTriggerOverlapBegin is NOT an exposed HeldenDamageBoxComponent
+    -- UFunction in the current live reflection dump. RegisterHook retries
+    -- for it produced repeated expensive failures. We rely on real
+    -- projectile callbacks, weapon attack events and nearest-player fallback.
     hook("/Script/Helden.HeldenProjectile:OnDamagedActor",
         safePre("projectile hit",function(projectile,overlap,otherActor)
             if not (S.mode==0 or S.phase==2) then return end
