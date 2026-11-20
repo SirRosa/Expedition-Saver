@@ -598,7 +598,7 @@ end
 local function queuePlayerDeath(pc,char,snapshot,reason)
     if not CFG.EnableRespawn or not onHost() then return false end
     local ctx=game()
-    if not ctx or not (ctx.phase==2 or (ctx.phase==3 and (S.active or ctx.failed))) then return false end
+    if not deathAllowed(ctx) then return false end
     if not valid(pc) or (not valid(char) and snapshot==nil) then return false end
     local key=path(pc)
     if not key or S.pending[key] then return false end
@@ -622,12 +622,12 @@ local function queuePlayerDeath(pc,char,snapshot,reason)
     S.pending[key]={controller=pc,oldChar=char,gear=inv,money=cash,
         started=os.clock(),ageTicks=0,attempts=0,nextRequestTick=0,
         deathPos=deathPos,deathWorld=worldName,oldCoins=oldCoins,
-        spawned=nil,delivered=false}
+        mode=ctx.mode,spawned=nil,delivered=false}
     S.deathEvents=S.deathEvents+1
     log("PLAYER DEATH queued from "..tostring(reason).." controller="..key..
         " oldPawn="..tostring(path(char)).." retained="..#inv..
         " cash="..(cash and (cash.Gold.."/"..cash.Artifacts.."/"..cash.Scraps) or "nil")..
-        " phase="..ctx.phase)
+        " phase="..ctx.phase.." mode="..ctx.mode)
     return true
 end
 local function captureDeath(char)
@@ -637,8 +637,7 @@ local function captureDeath(char)
     if valid(pc) then queuePlayerDeath(pc,char,nil,"Die_Auth") end
 end
 local function monitorPlayers(ctx)
-    if not CFG.EnableRespawn or not (ctx.phase==2 or
-        (ctx.phase==3 and (ctx.failed or S.active))) then return end
+    if not CFG.EnableRespawn or not deathAllowed(ctx) then return end
     local anyAlive=false
     for _,pc in ipairs(all("HeldenPlayerController")) do
         if valid(pc) then
@@ -669,7 +668,8 @@ local function monitorPlayers(ctx)
             local state=enum(get(char,"CharacterState"))
             local isSoul=valid(soul) and valid(pawn) and path(soul)==path(pawn)
             local dead=(state==1 or (health and health<=0) or isSoul or
-                (tracking.alive and ctx.phase==3 and ctx.failed))
+                (ctx.isExpedition and tracking.alive and
+                 ctx.phase==3 and ctx.failed))
             local activeCharacter=valid(char) and not dead and health and health>0
             if tracking.lastState~=state or tracking.lastHealth~=nil and
                     health and ((tracking.lastHealth>0)~=(health>0)) then
@@ -716,13 +716,31 @@ local function monitorPlayers(ctx)
     end
 end
 
-local function respawnLocation()
+-- Story can have no DungeonElevator; preserve native Story spawn position
+-- when available, and only revive the old pawn at a real player start.
+local function respawnLocation(entry,newPawn)
+    local story=entry and entry.mode==0
     local lift=first("HeldenDungeonElevator")
-    if not valid(lift) then return nil end
-    local comp=get(lift,"InteriorCollisionBox")
-    local loc=location(comp) or location(lift)
-    if not loc then return nil end
-    return {X=loc.X,Y=loc.Y,Z=loc.Z+80}
+    if not valid(lift) and story then lift=first("HeldenElevator") end
+    if valid(lift) then
+        local comp=get(lift,"InteriorCollisionBox")
+        local loc=location(comp) or location(lift)
+        if loc then return {X=loc.X,Y=loc.Y,Z=loc.Z+80} end
+    end
+    if not story then return nil end
+    if valid(newPawn) and
+       path(newPawn)~=path(entry and entry.oldChar) then
+        local at=location(newPawn)
+        if at then return at end
+    end
+    local spawn=first("PlayerStart")
+    local at=location(spawn)
+    if at then return {X=at.X,Y=at.Y,Z=at.Z+80} end
+    -- No valid spawn object: the last *known alive* location is preferable
+    -- to a blind 0,0,0 teleport. Native respawn remains first preference.
+    local last=entry and entry.deathPos
+    if last then return {X=last.X,Y=last.Y,Z=last.Z+100} end
+    return nil
 end
 local function heal(pawn)
     local stats=get(pawn,"CharacterStats")
@@ -760,11 +778,14 @@ local function ownsItem(pawn,item)
         valid(get(item,"CurrentSlot"))
 end
 local function collectAtElevator(entry,dest,pawn)
-    if not CFG.EnableItemRecovery then return end
     local key=path(entry.controller)
     if not key then return end
-    S.recoveries[key]={entry=entry,dest=dest,pawn=pawn,tick=0,
-        done={},attempts={},recreated={},warnings={}}
+    -- Money restoration and anti-duplication must NOT depend on the
+    -- separate gear-recovery feature flag.
+    if CFG.EnableItemRecovery and #entry.gear>0 then
+        S.recoveries[key]={entry=entry,dest=dest,pawn=pawn,tick=0,
+            done={},attempts={},recreated={},warnings={}}
+    end
     recoverMoney(pawn,entry)
     if CFG.CleanupNativeDeathCoins and CFG.EnableMoneyRecovery and
        entry.money and entry.deathPos and
@@ -940,9 +961,9 @@ local function reviveOldPawn(entry)
     if not CFG.EnableExistingPawnReviveFallback then return false end
     local char,pc=entry.oldChar,entry.controller
     if not valid(char) or not valid(pc) then return false end
-    local at=respawnLocation()
+    local at=respawnLocation(entry,char)
     if not at then
-        log("REVIVE FALLBACK: elevator location unavailable")
+        log("REVIVE FALLBACK: no safe Story/Expedition spawn location")
         return false
     end
     -- A native respawn is always attempted first. After it fails, re-enable
@@ -990,7 +1011,7 @@ local function processDeaths(ctx)
             local isSoul=valid(soul) and valid(pawn) and path(soul)==path(pawn)
             if pawn and not isSoul and path(pawn)~=path(entry.oldChar) and
                valid(get(pawn,"CharacterStats")) then
-                local at=respawnLocation()
+                local at=respawnLocation(entry,pawn)
                 if at and teleport(pawn,at) then
                     local healed=heal(pawn)
                     collectAtElevator(entry,at,pawn)
@@ -1677,10 +1698,9 @@ local function poll()
     S.phase=ctx.phase
 end
 
-local function isExpeditionDeath()
+local function isPlayableDeath()
     if not onHost() then return false end
-    local ctx=game()
-    return ctx and (ctx.phase==2 or (ctx.phase==3 and (S.active or ctx.failed)))
+    return deathAllowed(game())
 end
 local function watchDeath(context)
     S.rawDeathEvents=S.rawDeathEvents+1
@@ -1690,18 +1710,18 @@ local function watchDeath(context)
         log("RAW DIE_Auth actor="..tostring(path(character))..
             " host="..tostring(onHost())..
             " phase="..tostring(ctx and ctx.phase)..
-            " accepted="..tostring(isExpeditionDeath()))
+            " accepted="..tostring(isPlayableDeath()))
     end
-    if not valid(character) or not isExpeditionDeath() then return end
+    if not valid(character) or not isPlayableDeath() then return end
     captureDeath(character)
 end
 local function watchControllerKilled(context)
     local pc=unwrap(context)
     if valid(pc) then
         log("RAW OnPlayerKilled controller="..tostring(path(pc))..
-            " accepted="..tostring(isExpeditionDeath()))
+            " accepted="..tostring(isPlayableDeath()))
     end
-    if not valid(pc) or not isExpeditionDeath() then return end
+    if not valid(pc) or not isPlayableDeath() then return end
     local old=get(pc,"LastPlayerChar")
     if valid(old) then captureDeath(old) end
 end
@@ -1803,7 +1823,8 @@ if CFG.EnableNoPermadeath then
                 log("HAS FAILED check event host="..tostring(onHost())..
                     " ctx="..tostring(ctx and ctx.phase))
             end
-            if valid(gs) and ctx and path(ctx.gs)==path(gs) then
+            if valid(gs) and ctx and ctx.isExpedition and
+               path(ctx.gs)==path(gs) then
                 return false
             end
         end))
@@ -1811,7 +1832,8 @@ if CFG.EnableNoPermadeath then
         safePre("EndDungeonRunSequence",function(context,statsArg)
             local gs=unwrap(context)
             local ctx=onHost() and game()
-            if not ctx or path(ctx.gs)~=path(gs) then return end
+            if not ctx or not ctx.isExpedition or
+               path(ctx.gs)~=path(gs) then return end
             local stats=unwrap(statsArg)
             if get(stats,"bHaveFailed")==true then
                 S.failed=true;S.recoveryRequired=true
@@ -1825,7 +1847,8 @@ if CFG.EnableNoPermadeath then
         safePostBool(function(context)
             if not S.recoveryRequired or not onHost() then return end
             local ctx=game()
-            if not ctx or (ctx.phase~=0 and ctx.phase~=3) then return end
+            if not ctx or not ctx.isExpedition or
+               (ctx.phase~=0 and ctx.phase~=3) then return end
             local machine=first("HeldenElevatorMachine")
             if valid(machine) and path(machine)==path(unwrap(context)) then return true end
         end))
