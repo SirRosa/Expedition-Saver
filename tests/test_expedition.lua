@@ -1097,6 +1097,9 @@ test("Story trash native Artifact Coins resource pays wallet",function()
     t.registry.HeldenDataSingleton=nil
     t.loot.RandomMoneySpawn={Type="EHeldenResource::Artifacts",Amount=3}
     t.loot.MoneySpawnChance=100 -- 100 percent also supported
+    function t.loot:GetInspectData()
+        return {bIsInDungeon=false,Value={Gold=0,Artifacts=0,Scraps=0}}
+    end
     t.tick(0);t.destroyLoot(true);t.tick(0)
     assert(t.corpse.Money.Gold==80 and t.corpse.Money.Artifacts==7)
     assert(#t.spawned==0)
