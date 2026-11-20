@@ -1,0 +1,37 @@
+name: Expedition mapping collector — validate and package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lua 5.4
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y lua5.4
+      - name: Syntax check
+        run: |
+          luac5.4 -p ue4ss/Mods/ExpeditionMapper/Scripts/main.lua
+          luac5.4 -p tests/test_mapper.lua
+      - name: Test mapping collector
+        run: lua5.4 tests/test_mapper.lua
+      - name: Package mapper (read-only diagnostic)
+        run: |
+          mkdir -p out
+          zip -r out/ExpeditionMapper-v0.1.0.zip ue4ss/Mods/ExpeditionMapper/
+          unzip -t out/ExpeditionMapper-v0.1.0.zip
+      - name: Publish install ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExpeditionMapper-v0.1.0
+          path: out/ExpeditionMapper-v0.1.0.zip
+          if-no-files-found: error
