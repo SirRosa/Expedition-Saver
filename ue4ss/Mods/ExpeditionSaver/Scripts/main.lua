@@ -537,10 +537,7 @@ hook("/Script/Helden.HeldenPlayerController:OnPlayerKilled",
      function() end,watchControllerKilled)
 hook("/Script/Helden.HeldenPlayerController:OnNewPawn",
      function() end,watchNewPawn)
-local function heartbeat()
-    S.sample=S.sample+1
-    if S.sample<CFG.AnimationSample then return end
-    S.sample=0
+local function safePoll()
     local now=os.clock()
     if S.lastPoll>=0 and now>=S.lastPoll and now-S.lastPoll<CFG.PollSeconds then return end
     S.lastPoll=now
@@ -549,19 +546,25 @@ local function heartbeat()
         S.warned=true;log("poll error: "..tostring(err))
     end
 end
+local function heartbeat()
+    S.sample=S.sample+1
+    if S.sample<CFG.AnimationSample then return end
+    S.sample=0
+    safePoll()
+end
 -- Persistent game-thread polling is crucial: when the final player dies,
 -- BlueprintUpdateAnimation may stop entirely. UE4SS v3 has LoopAsync and
 -- ExecuteInGameThread; v4 also has a direct game-thread timer.
 local scheduled=false
 if type(LoopInGameThreadWithDelay)=="function" then
     local ok=pcall(function()
-        LoopInGameThreadWithDelay(450,function() heartbeat() end)
+        LoopInGameThreadWithDelay(450,function() safePoll() end)
     end)
     if ok then scheduled=true;log("game-thread timer active (450 ms)") end
 elseif type(LoopAsync)=="function" and type(ExecuteInGameThread)=="function" then
     local ok=pcall(function()
         LoopAsync(450,function()
-            pcall(function() ExecuteInGameThread(function() heartbeat() end) end)
+            pcall(function() ExecuteInGameThread(function() safePoll() end) end)
             return false
         end)
     end)
