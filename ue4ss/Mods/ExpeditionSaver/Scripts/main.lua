@@ -395,111 +395,171 @@ local function processDeaths(ctx)
         end
     end
 end
-local function unwrapObject(r)
-    r=unwrap(r)
-    if not valid(r) then return nil end
-    return r
-end
-local function hostController()
-    for _,pc in ipairs(all("HeldenPlayerController")) do
-        if valid(pc) then
-            local ok,localController=pcall(function() return pc:IsLocalController() end)
-            if ok and localController==true then return pc end
-        end
+-- Automatic payout on physical destruction. There is no hotkey.
+-- The game still handles its native scrap/resource drops; we add only
+-- the Gold/Artifacts that the *same actor* would pay at extraction.
+-- IMPORTANT: Read live structs/tables, which also sees QOL's edited values.
+local function rowOf(tableObject,rowName)
+    if not valid(tableObject) or not rowName then return nil end
+    local ok,row=pcall(function() return tableObject:FindRow(rowName) end)
+    if ok and row then return unwrap(row) end
+    ok,row=pcall(function() return tableObject:GetRowMap() end)
+    if ok and type(row)=="table" then
+        return unwrap(row[tostring(rowName)])
     end
-    -- On some listen servers this native method is not exposed.
-    return nil
 end
-local function findCoinTarget(pc)
-    local pawn=currentPawn(pc)
-    if not valid(pawn) then return nil end
-    local grab=get(get(pawn,"PhysGrabData"),"Target")
-    local target=unwrapObject(grab)
-    if not target then
-        local inter=get(pc,"CurrentInteractTarget")
-        if valid(inter) then
-            local ok,owner=pcall(function() return inter:GetOwner() end)
-            if ok then target=unwrapObject(owner) end
-        end
-    end
-    if not target then return nil end
-    -- Exactly Epic construct quality, no guessing based on material color.
-    if enum(get(target,"ConstructQuality"))~=2 then return nil end
-    -- Don't destroy quest/puzzle requirements for an optional currency action.
-    if get(target,"bIsQuestObjective")==true or
-       get(target,"bRequireQuestObjectiveToKill")==true then return nil end
-    local pdata
-    local ok=pcall(function() pdata=target:GetInspectData() end)
-    if not ok or not pdata or get(pdata,"bIsInDungeon")~=true then return nil end
-    local value=get(pdata,"Value")
-    local artifacts=number(get(value,"Artifacts"),1,CFG.MaxArtifactsPerConversion)
-    if not artifacts then return nil end
-    local own=location(pawn)
-    local obj=location(target)
-    if distance2(own,obj)>CFG.MaxCoinDistance^2 then return nil end
-    return target,artifacts,obj
-end
-local function coinClass()
+local function lootValue(actor)
+    if not valid(actor) then return nil end
+    local id=path(actor) or ""
+    local normalized=id:lower()
+    -- Coin/pickup destruction must never recursively create currency.
+    if normalized:find("coin",1,true) or normalized:find("pickup",1,true) then return nil end
     local ds=first("HeldenDataSingleton")
-    local cls=ds and get(ds,"ArtifactCoinActorClass")
-    if valid(cls) then return cls end
+    local inspected
+    pcall(function() inspected=actor:GetInspectData() end)
+    if inspected and get(inspected,"bIsInDungeon")==true then
+        local value=get(inspected,"Value")
+        if value then
+            local gold=number(get(value,"Gold"),0,CFG.MaxCoinsPerDrop) or 0
+            local artifacts=number(get(value,"Artifacts"),0,CFG.MaxCoinsPerDrop) or 0
+            return {gold=gold,artifacts=artifacts,source="inspect"}
+        end
+    end
+    if not ds then return nil end
+    -- Reflected actor DataName fields are used as keys; never infer rewards
+    -- from an object's color or from an unrelated player's inventory.
+    local construct=get(actor,"ConstructAsset")
+    if valid(construct) then
+        local n=get(construct,"DataName")
+        local dt=get(ds,"ConstructAssetDataTable")
+        local row=rowOf(dt,n)
+        if row then
+            local quality=enum(get(actor,"ConstructQuality"))
+            local key=quality==2 and "Parsed_ScrapValue_Epic"
+                or quality==1 and "Parsed_ScrapValue_Rare"
+                or "Parsed_ScrapValue_Common"
+            local value=get(row,key)
+            if value then
+                return {gold=number(get(value,"Gold"),0,CFG.MaxCoinsPerDrop) or 0,
+                    artifacts=number(get(value,"Artifacts"),0,CFG.MaxCoinsPerDrop) or 0,
+                    source="construct-table"}
+            end
+        end
+    end
+    -- Non-construct physical loot uses PhysActorData, where QOL multiplies
+    -- Parsed_ScrapReward.Gold. No additional multiplier is applied here.
+    local n=get(actor,"ConstructDataName") or get(actor,"StatsDataName")
+    if not n then return nil end
+    local row=rowOf(get(ds,"PhysActorDataTable"),n)
+    local value=row and get(row,"Parsed_ScrapReward")
+    if not value then return nil end
+    return {gold=number(get(value,"Gold"),0,CFG.MaxCoinsPerDrop) or 0,
+        artifacts=number(get(value,"Artifacts"),0,CFG.MaxCoinsPerDrop) or 0,
+        source="physical-table"}
 end
-local function convertCoin()
-    if not CFG.EnablePhysicalCoins then return end
+local function destructionEvent(ctx,origin)
     if not onHost() then return end
-    local ctx=game()
-    if not ctx or ctx.phase~=2 then
-        log("F7: only available inside an active Expedition")
+    local gameCtx=game()
+    if not gameCtx or gameCtx.phase~=2 then return end
+    local a=unwrap(ctx)
+    if not valid(a) or not valid(get(a,"StatsComponent")) then return end
+    -- Require an actual in-dungeon loot actor; never pay for built furniture.
+    local owning=get(a,"OwningDungeon")
+    local inspecting
+    pcall(function() inspecting=a:GetInspectData() end)
+    local inDungeon=inspecting and get(inspecting,"bIsInDungeon")==true
+    if not inDungeon and not valid(unwrap(owning)) then return end
+    if origin=="health" then
+        local hp=tonumber(get(get(a,"StatsComponent"),"CurrentHealth"))
+        if not hp or hp>0 then return end
+    end
+    local key=path(a)
+    if not key or S.destructionSeen[key] then return end
+    S.rewardEvents=S.rewardEvents+1
+    local value=lootValue(a)
+    if not value then
+        if S.rewardEvents<=15 then log("DESTRUCTION "..origin.." "..key.." (no reward data)") end
         return
     end
-    local pc=hostController()
-    if not pc then log("F7: host player controller not found");return end
-    local target,amount,pos=findCoinTarget(pc)
-    if not target then
-        log("F7: aim at or grab an Epic artifact with a positive Artifact Coin value")
+    if value.gold<=0 and value.artifacts<=0 then
+        if S.rewardEvents<=15 then log("DESTRUCTION "..origin.." "..key.." (no coin payout)") end
         return
     end
-    local id=path(target)
-    if not id or S.coinLedger[id] then return end
-    local cls=coinClass()
-    if not cls then log("F7: ArtifactCoinActorClass unavailable; loot untouched");return end
+    local at=location(a)
     local world
-    pcall(function() world=target:GetWorld() end)
-    if not valid(world) then log("F7: World unavailable; loot untouched");return end
-    -- Reserve this actor transaction before any spawn. This is a session-only
-    -- guard against double clicks, not an unsafe persistent economic rollback.
-    S.coinLedger[id]=true
-    local at={X=pos.X,Y=pos.Y,Z=pos.Z+60}
+    pcall(function() world=a:GetWorld() end)
+    if not at or not valid(world) then
+        log("DESTRUCTION "..origin.." cannot resolve world/position; no payout")
+        return
+    end
+    S.destructionSeen[key]=true
+    S.dropQueue[#S.dropQueue+1]={world=world,at=at,key=key,
+        gold=value.gold,artifacts=value.artifacts,source=value.source,
+        queued=os.clock(),goldDone=false,artifactDone=false}
+    log("DESTRUCTION queued "..key.." gold="..value.gold.." artifacts="..
+        value.artifacts.." source="..value.source.." from="..origin)
+end
+local function spawnMoney(world,position,actorClass,amount,currency)
+    if not valid(world) or not valid(actorClass) or amount<=0 then return false end
     local ok,coin=pcall(function()
-        return world:SpawnActor(cls,at,{Pitch=0,Yaw=0,Roll=0})
+        return world:SpawnActor(actorClass,position,{Pitch=0,Yaw=0,Roll=0})
     end)
-    if not ok or not valid(coin) then
-        S.coinLedger[id]=nil
-        log("F7: coin spawn failed; artifact left untouched")
-        return
-    end
+    if not ok or not valid(coin) then return false end
     local money=get(coin,"Money")
-    local initialized=money and put(money,"Artifacts",amount)
-    if initialized then
-        -- Explicitly zero the other denominations for exact conversion.
-        put(money,"Gold",0);put(money,"Scraps",0)
-        initialized=number(get(money,"Artifacts"),0,CFG.MaxArtifactsPerConversion)==amount and
-            number(get(money,"Gold"),0,1000000)==0 and
-            number(get(money,"Scraps"),0,1000000)==0
-    end
-    if not initialized then
-        log("F7: coin initialization unverified; original loot preserved")
+    if not money then
         pcall(function() coin:K2_DestroyActor() end)
-        return
+        return false
     end
-    local destroyed=pcall(function() target:K2_DestroyActor() end)
-    if not destroyed then
-        -- Fail closed: don't hand out extra currency alongside intact loot.
+    local success=put(money,"Gold",currency=="Gold" and amount or 0)
+        and put(money,"Artifacts",currency=="Artifacts" and amount or 0)
+        and put(money,"Scraps",0)
+    -- Check the *actor's own* struct again; success on a Lua copy isn't enough.
+    local actual=get(coin,"Money")
+    success=success and number(get(actual,currency),0,CFG.MaxCoinsPerDrop)==amount
+        and number(get(actual,"Scraps"),0,CFG.MaxCoinsPerDrop)==0
+        and number(get(actual,currency=="Gold" and "Artifacts" or "Gold"),
+            0,CFG.MaxCoinsPerDrop)==0
+    if not success then
         pcall(function() coin:K2_DestroyActor() end)
-        log("F7: cannot consume original loot; attempted coin rollback")
-        return
+        return false
     end
-    log("F7: converted Epic loot into physical "..amount.." Artifact Coins")
+    return true
+end
+local function processDropQueue()
+    if #S.dropQueue==0 or not onHost() then return end
+    local ds=first("HeldenDataSingleton")
+    if not ds then return end
+    local goldClass=get(ds,"GoldCoinActorClass")
+    local artifactClass=get(ds,"ArtifactCoinActorClass")
+    local now=os.clock()
+    for i=#S.dropQueue,1,-1 do
+        local job=S.dropQueue[i]
+        if now-job.queued>=CFG.RewardDelaySeconds then
+            local done=true
+            if job.gold>0 and not job.goldDone then
+                job.goldDone=spawnMoney(job.world,job.at,goldClass,job.gold,"Gold")
+                if job.goldDone then
+                    log("DROP gold="..job.gold.." "..job.key)
+                else done=false end
+            end
+            if job.artifacts>0 and not job.artifactDone then
+                local offset={X=job.at.X+65,Y=job.at.Y,Z=job.at.Z+25}
+                job.artifactDone=spawnMoney(job.world,offset,artifactClass,
+                    job.artifacts,"Artifacts")
+                if job.artifactDone then
+                    log("DROP artifacts="..job.artifacts.." "..job.key)
+                else done=false end
+            end
+            if done or now-job.queued>5 then
+                if not done then
+                    log("WARNING partial/unpaid extraction reward: "..job.key..
+                        " goldDone="..tostring(job.goldDone)..
+                        " artifactsDone="..tostring(job.artifactDone))
+                end
+                table.remove(S.dropQueue,i)
+            end
+        end
+    end
 end
 
 local function poll()
