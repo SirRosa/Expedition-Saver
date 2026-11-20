@@ -224,7 +224,8 @@ local S={
     deathEvents=0,newPawnEvents=0,rewardEvents=0,rawDeathEvents=0,rawDestroyEvents=0,heartbeatTicks=1000,machineRepairCycle=1000,
     players={},recoveries={},observedDeaths=0,failedBarriers=0,coinsLocated=0,
     unresolvedTreasureLogs=0,
-    damageHits={},pollCycle=0,gearScanTick=-1,gearScanObjects={},
+    damageHits={},attackIntents={},pollCycle=0,
+    gearScanTick=-1,gearScanObjects={},
     coinBaseline={},coinBaselineCycle=0,coinBaselineReady=false,
     currencyCleanup={},claimedDeathCoins={},
     failureChecks=0,
@@ -296,7 +297,7 @@ local function resetForSave(ctx,key,slot)
     S.currencyCleanup=preserve and oldCurrencyCleanup or {}
     S.coinBaseline={};S.coinBaselineCycle=0;S.coinBaselineReady=false
     S.claimedDeathCoins={}
-    S.damageHits={};S.pollCycle=0
+    S.damageHits={};S.attackIntents={};S.pollCycle=0
     S.gearScanTick=-1;S.gearScanObjects={}
     S.nextBackupDepth=-1
     S.dropQueue={};S.destructionSeen={}
@@ -1274,6 +1275,15 @@ local function recordDamage(target,pc,kind)
     end
 end
 
+local function recordAttackIntent(weapon)
+    if not (S.mode==0 or S.phase==2) then return end
+    local pc=ownerController(weapon)
+    local id=valid(pc) and path(pc) or nil
+    if id then
+        S.attackIntents[id]={tick=S.pollCycle}
+    end
+end
+
 local function selectDestroyer(actor,origin)
     if not CFG.DirectFurnitureRewards then return nil,"disabled" end
     local key=path(actor)
@@ -1281,6 +1291,7 @@ local function selectDestroyer(actor,origin)
     local recent=hit and S.pollCycle-hit.tick<=2
     local sole,chosen,players,eligible=nil,nil,0,0
     local close,closeCount=nil,0
+    local attacking,attackerCount=nil,0
     local at=location(actor)
     local rangeSq=CFG.RewardNearbyPlayerRadius^2
     for _,pc in ipairs(all("HeldenPlayerController")) do
@@ -1298,12 +1309,22 @@ local function selectDestroyer(actor,origin)
                     if pos and distance2(pos,at)<=rangeSq then
                         closeCount=closeCount+1
                         if closeCount==1 then close=pawn end
+                        local attack=S.attackIntents[path(pc)]
+                        if attack and S.pollCycle-attack.tick<=2 then
+                            attackerCount=attackerCount+1
+                            if attackerCount==1 then attacking=pawn end
+                        end
                     end
                 end
             end
         end
     end
     if valid(chosen) then return chosen,"verified-"..hit.kind end
+    if attackerCount==1 and valid(attacking) and
+       not (recent and hit.ambiguous) then
+        return attacking,"recent-weapon-attack"
+    end
+    if attackerCount>1 then return nil,"multiple-attackers" end
     -- If another player is dead, do not treat this as a solo session.
     if players==1 and eligible==1 and valid(sole) then
         return sole,"single-player"
@@ -1703,6 +1724,9 @@ local function poll()
         for key,hit in pairs(S.damageHits) do
             if S.pollCycle-hit.tick>3 then S.damageHits[key]=nil end
         end
+        for key,attack in pairs(S.attackIntents) do
+            if S.pollCycle-attack.tick>3 then S.attackIntents[key]=nil end
+        end
     end
     local now=os.clock()
     local host=onHost()
@@ -1928,6 +1952,10 @@ end
 -- Damage ownership hooks are event-driven, not per animation frame.
 -- These reflected callbacks carry the actual target actor.
 if CFG.DirectFurnitureRewards then
+    hook("/Script/Helden.HeldenWeapon:Attack_Server",
+        safePre("weapon attack",function(weapon)
+            recordAttackIntent(unwrap(weapon))
+        end))
     hook("/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin",
         safePre("damage overlap",function(component,overlap,otherActor)
             local box=unwrap(component)
