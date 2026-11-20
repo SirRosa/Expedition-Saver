@@ -1,5 +1,16 @@
 # Grain Rot — Expedition Saver
 
+## v0.6.0 — experimental direct reward and stutter reduction
+
+- When furniture or dungeon treasure is destroyed, credits its Gold / Artifact Coins directly to the verified player wallet, without spawning physics coin actors.
+- For solo play, uses the sole player. In co-op, requires an active damage-box overlap or projectile hit associated with that player in a short window. **Does not use the destructible actor's own GetInstigatorController as proof of killer**.
+- If co-op attribution is unavailable or ambiguous, physical money is retained instead of silently giving it to the wrong player or deleting the reward. Native scrap/resource drops stay unchanged.
+- Before direct payout, validates `Money` changes through a fresh readback; retains physical fallback when it cannot verify the credit.
+- Skips expensive full Expedition context lookups for non-lethal physics-health events and shares one global equipment scan across co-op players per 300-ms poll. `PERF slow Expedition poll CPU=...ms` logs costly cycles.
+- Carries the prior anti-duplication patch for money dropped at the player's death; **never deletes equipment actors**.
+- This is a GitHub Actions mock-tested experimental branch; actual damage attribution, HUD/replication, and stall improvements are not yet confirmed in Grain Rot.
+
+
 ## v0.5.1-alpha — testowa poprawka duplikowania waluty po śmierci
 
 **Problem:** v0.5 przywracał `HeldenCharacter.Money` (Gold, Artifacts, Scraps)

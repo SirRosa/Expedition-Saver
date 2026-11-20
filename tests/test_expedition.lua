@@ -208,7 +208,19 @@ local function fixture()
             assert(h and h.pre)
             h.pre(corpse)
         end,
-        destroyLoot=function()
+        destroyLoot=function(direct)
+            -- Legacy physics payout tests need a truly ambiguous co-op state.
+            -- Default exposes two eligible player controllers without a native
+            -- instigator; an explicit direct=true tests solo wallet credit.
+            if not direct then
+                local second=actor({_name="HeldenPlayerController /Game/Second"})
+                local otherPawn=actor({_name="HeldenPlayerCharacter /Game/SecondPawn",
+                    Money={Gold=0,Artifacts=0,Scraps=0},
+                    CharacterStats=actor({CurrentHealth=100,
+                        TotalStats={MaxHealth=100}})})
+                function second:GetPawn() return otherPawn end
+                listing.HeldenPlayerController[2]=second
+            end
             local h=hooks["/Script/Helden.HeldenPhysicsActor:OnHealthModifed"]
             local d=hooks["/Script/Helden.HeldenPhysicsActor:PlayDestructionEffect_Mulitcast"]
             assert(h and d,"destruction hooks not registered")
@@ -352,7 +364,9 @@ test("hammer destruction below health zero is required for health trigger",funct
     assert(#t.spawned==0)
     t.loot.StatsComponent.CurrentHealth=0
     h.pre(t.loot);t.tick(1)
-    assert(#t.spawned==2)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
+        "lethal callback must pay the solo player directly")
 end)
 test("elevator machine is unlocked after expedition wipe at home station",function()
     local t=fixture();t.tick()
@@ -776,6 +790,98 @@ test("fresh same-value currency from a different world must not be removed",func
     for _=1,9 do t.tick(0) end
     assert(elsewhere:IsValid() and not elsewhere.destroyed)
     assert(t.newPawn.Money.Gold==80)
+end)
+
+test("solo furniture reward credits wallet directly without coin actors",function()
+    local t=fixture()
+    t.tick(0)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==0,"direct payout must not spawn physical coin actors")
+    assert(t.corpse.Money.Gold==100)
+    assert(t.corpse.Money.Artifacts==10)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(t.corpse.Money.Gold==100,"two hooks must not credit twice")
+end)
+
+test("verified active damage overlap targets correct co-op player",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/P2"})
+    local secondPawn=actor({_name="HeldenPlayerCharacter /Game/P2Pawn",
+        Money={Gold=5,Artifacts=1,Scraps=9}})
+    function second:GetPawn() return secondPawn end
+    t.listing.HeldenPlayerController[2]=second
+    local attackBox=actor({bDamageActive=true})
+    function attackBox:GetOwner() return secondPawn end
+    t.tick(0)
+    local h=t.hooks["/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin"]
+    assert(h and h.pre,"active damage event hook is required")
+    h.pre(attackBox,nil,t.loot)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==80)
+    assert(secondPawn.Money.Gold==25 and secondPawn.Money.Artifacts==7)
+    assert(secondPawn.Money.Scraps==9,"destroy reward must not touch scrap")
+end)
+
+test("victim actor instigator alone is NOT trustworthy co-op damage proof",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/P2"})
+    local secondPawn=actor({_name="HeldenPlayerCharacter /Game/P2Pawn",
+        Money={Gold=5,Artifacts=1,Scraps=9}})
+    function second:GetPawn() return secondPawn end
+    t.listing.HeldenPlayerController[2]=second
+    function t.loot:GetInstigatorController() return second end
+    t.tick(0)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==2,"not enough proof of destruction to award to actor creator")
+    assert(secondPawn.Money.Gold==5)
+end)
+
+test("ambiguous multiplayer leaves physical coin fallback instead of wrong wallet",function()
+    local t=fixture()
+    t.tick(0)
+    t.destroyLoot()
+    t.tick(0)
+    assert(#t.spawned==2)
+    assert(t.corpse.Money.Gold==80 and t.corpse.Money.Artifacts==4)
+end)
+
+test("dead co-op partner is not treated as true single-player",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/DeadPartner"})
+    local deadSoul=actor({_name="HeldenCharacterSoul /Game/Soul"})
+    function second:GetPawn() return deadSoul end
+    t.listing.HeldenPlayerController[2]=second
+    t.tick(0)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==2,"unknown killer in co-op must fall back to world currency")
+    assert(t.corpse.Money.Gold==80)
+end)
+
+test("two active damage sources make payout unassignable",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/P2"})
+    local secondPawn=actor({_name="HeldenPlayerCharacter /Game/P2Pawn",
+        Money={Gold=5,Artifacts=1,Scraps=9}})
+    function second:GetPawn() return secondPawn end
+    t.listing.HeldenPlayerController[2]=second
+    local hit=t.hooks["/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin"]
+    local box1=actor({bDamageActive=true})
+    local box2=actor({bDamageActive=true})
+    function box1:GetOwner() return t.corpse end
+    function box2:GetOwner() return secondPawn end
+    t.tick(0)
+    hit.pre(box1,nil,t.loot)
+    hit.pre(box2,nil,t.loot)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==2)
+    assert(t.corpse.Money.Gold==80 and secondPawn.Money.Gold==5)
 end)
 
 print("ALL TESTS PASSED ("..passed..")")

@@ -19,6 +19,9 @@ local CFG = {
     DeathCoinScanTicks = 40, -- 12 seconds on the 300ms engine timer
     EnableNoPermadeath = true,
     EnablePhysicalCoins = true,
+    DirectFurnitureRewards = true, -- wallet credit to proven destroyer
+    SlowPollWarnSeconds = 0.035,
+    CoinBaselineEveryPolls = 4, -- preserve strict pre-death baseline for anti-duplication
     RespawnDelaySeconds = 0.15,
     RespawnRetrySeconds = 1.5,
     MaxRespawnRequests = 3,
@@ -205,6 +208,7 @@ local S={
     deathEvents=0,newPawnEvents=0,rewardEvents=0,rawDeathEvents=0,rawDestroyEvents=0,heartbeatTicks=1000,machineRepairCycle=1000,
     players={},recoveries={},observedDeaths=0,failedBarriers=0,coinsLocated=0,
     unresolvedTreasureLogs=0,
+    damageHits={},pollCycle=0,gearScanTick=-1,gearScanObjects={},
     coinBaseline={},coinBaselineCycle=0,currencyCleanup={},
     failureChecks=0
 }
@@ -267,6 +271,8 @@ local function resetForSave(ctx,key,slot)
     S.recoveries=preserve and oldRecoveries or {}
     S.currencyCleanup=preserve and oldCurrencyCleanup or {}
     S.coinBaseline={};S.coinBaselineCycle=0
+    S.damageHits={};S.pollCycle=0
+    S.gearScanTick=-1;S.gearScanObjects={}
     S.nextBackupDepth=-1
     S.dropQueue={};S.destructionSeen={}
     S.nextMachineRepair=0;S.machineRepairAttempts=0
@@ -509,7 +515,7 @@ local function processCurrencyCleanup()
     end
 end
 
-local function gearOf(char)
+local function gearOf(char,forceFresh)
     if not valid(char) then return {} end
     local result,seen={},{}
     local function add(item,source,slotIndex)
@@ -538,7 +544,13 @@ local function gearOf(char)
         if valid(slot) then add(get(slot,"CurrentItemInSlot"),"ItemSlots",i-1) end
     end)
     local owner=path(char)
-    for _,item in ipairs(all("HeldenEquipableItem")) do
+    -- At most one UObject-wide equipment scan per game-thread poll,
+    -- shared by all co-op players. An actual death requests a fresh list.
+    if forceFresh or S.gearScanTick~=S.pollCycle then
+        S.gearScanTick=S.pollCycle
+        S.gearScanObjects=all("HeldenEquipableItem")
+    end
+    for _,item in ipairs(S.gearScanObjects) do
         if valid(item) and path(get(item,"PreviousOwner"))==owner and
            valid(get(item,"CurrentSlot")) then
             add(item,"PreviousOwner")
@@ -569,7 +581,7 @@ local function queuePlayerDeath(pc,char,snapshot,reason)
         if path(candidate)==key then player=true;break end
     end
     if not player then return false end
-    local inv=snapshot or gearOf(char)
+    local inv=snapshot or gearOf(char,true)
     local tracked=S.players[key]
     local cash=(tracked and tracked.money) or snapshotMoney(char)
     local deathPos=(tracked and tracked.lastLocation) or location(char)
@@ -671,7 +683,7 @@ local function monitorPlayers(ctx)
     -- One registry scan at most every 4 poll cycles, regardless of player count.
     if anyAlive then
         S.coinBaselineCycle=S.coinBaselineCycle+1
-        if S.coinBaselineCycle>=4 then
+        if S.coinBaselineCycle>=CFG.CoinBaselineEveryPolls then
             S.coinBaselineCycle=0
             snapshotExistingCoins()
         end
@@ -1125,6 +1137,109 @@ local function lootValue(actor)
     end
     return inspectedZero
 end
+-- The destroyed actor's GetInstigatorController() describes the actor's
+-- OWN creation context, not necessarily the attacking player. Never credit
+-- it as damage evidence. Track actual active damage overlaps and projectile
+-- damage instead, matching player-controlled attack owners to the target.
+local function ownerController(source)
+    source=unwrap(source)
+    if not valid(source) then return nil end
+    local ids={}
+    local obj=source
+    for _=1,4 do
+        if not valid(obj) then break end
+        local id=path(obj)
+        if not id or ids[id] then break end
+        ids[id]=true
+        local previous=get(obj,"PreviousOwner")
+        local nextObj
+        if valid(previous) then nextObj=previous
+        else pcall(function() nextObj=obj:GetOwner() end) end
+        obj=nextObj
+    end
+    local pcList=all("HeldenPlayerController")
+    for _,pc in ipairs(pcList) do
+        if valid(pc) then
+            local pawn=currentPawn(pc)
+            if valid(pawn) and ids[path(pawn)] then return pc end
+        end
+    end
+    return nil
+end
+
+local function recordDamage(target,pc,kind)
+    if S.phase~=2 or not valid(target) or not valid(pc) or
+       not valid(get(target,"StatsComponent")) then return end
+    local key,player=path(target),path(pc)
+    if not key or not player then return end
+    local prev=S.damageHits[key]
+    if prev and S.pollCycle-prev.tick<=2 and
+       prev.player~=player then
+        prev.ambiguous=true
+        prev.tick=S.pollCycle
+    else
+        S.damageHits[key]={player=player,tick=S.pollCycle,kind=kind,
+            ambiguous=(prev and S.pollCycle-prev.tick<=2 and
+                prev.ambiguous) or false}
+    end
+end
+
+local function selectDestroyer(actor)
+    if not CFG.DirectFurnitureRewards then return nil,"disabled" end
+    local key=path(actor)
+    local hit=key and S.damageHits[key] or nil
+    local recent=hit and S.pollCycle-hit.tick<=2
+    local sole,chosen,players,eligible=nil,nil,0,0
+    for _,pc in ipairs(all("HeldenPlayerController")) do
+        if valid(pc) then
+            players=players+1
+            local pawn=currentPawn(pc)
+            if valid(pawn) and get(pawn,"Money") then
+                eligible=eligible+1
+                if eligible==1 then sole=pawn end
+                if recent and not hit.ambiguous and path(pc)==hit.player then
+                    chosen=pawn
+                end
+            end
+        end
+    end
+    if valid(chosen) then return chosen,"verified-"..hit.kind end
+    -- If another player is dead, do not treat this as a solo session.
+    if players==1 and eligible==1 and valid(sole) then
+        return sole,"single-player"
+    end
+    return nil,players>1 and "unverified-coop" or "no-owner"
+end
+
+local function creditReward(pawn,currency,amount)
+    if not valid(pawn) or amount<=0 then return false end
+    local money=get(pawn,"Money")
+    local old=number(get(money,currency),0,100000000)
+    if old==nil or old+amount>100000000 then return false end
+    local goal=old+amount
+    -- UE4SS can return an attached proxy or a copied UScriptStruct.
+    put(money,currency,goal)
+    local after=number(get(get(pawn,"Money"),currency),0,100000000)
+    if after~=goal and after==old then
+        local fresh=get(pawn,"Money")
+        local newMoney={}
+        for _,key in ipairs({"Gold","Artifacts","Scraps"}) do
+            newMoney[key]=number(get(fresh,key),0,100000000)
+            if newMoney[key]==nil then return false end
+        end
+        newMoney[currency]=goal
+        put(pawn,"Money",newMoney)
+        after=number(get(get(pawn,"Money"),currency),0,100000000)
+    end
+    if after==goal then
+        pcall(function() pawn:ForceNetUpdate() end)
+        return true
+    end
+    log("DIRECT REWARD not verified "..currency..
+        " expected="..goal.." actual="..tostring(after))
+    return false
+end
+
 local function destructionEvent(ctx,origin)
     S.rawDestroyEvents=S.rawDestroyEvents+1
     local a=unwrap(ctx)
@@ -1132,13 +1247,17 @@ local function destructionEvent(ctx,origin)
         log("RAW DESTRUCTION "..origin.." actor="..tostring(path(a))..
             " host="..tostring(onHost()))
     end
+    -- Reject the common nonlethal hits before expensive reflected context.
+    if S.phase~=2 or not valid(a) then return end
+    local stats=get(a,"StatsComponent")
+    if not valid(stats) then return end
+    if origin=="health" then
+        local hp=tonumber(get(stats,"CurrentHealth"))
+        if not hp or hp>0 then return end
+    end
     if not onHost() then return end
     local gameCtx=game()
-    if not gameCtx or gameCtx.phase~=2 then
-        if S.rawDestroyEvents<=10 then log("DROP SKIP: Expedition not recognized") end
-        return
-    end
-    if not valid(a) or not valid(get(a,"StatsComponent")) then return end
+    if not gameCtx or gameCtx.phase~=2 then return end
     if get(a,"bIsQuestObjective")==true or
        get(a,"bRequireQuestObjectiveToKill")==true then return end
     -- Require an actual in-dungeon loot actor; never pay for built furniture.
@@ -1151,10 +1270,6 @@ local function destructionEvent(ctx,origin)
             log("DROP SKIP: no valid dungeon origin for "..tostring(path(a)))
         end
         return
-    end
-    if origin=="health" then
-        local hp=tonumber(get(get(a,"StatsComponent"),"CurrentHealth"))
-        if not hp or hp>0 then return end
     end
     local key=path(a)
     if not key or S.destructionSeen[key] then return end
@@ -1176,8 +1291,10 @@ local function destructionEvent(ctx,origin)
         return
     end
     S.destructionSeen[key]=true
+    local recipient,ownership=selectDestroyer(a)
     S.dropQueue[#S.dropQueue+1]={world=world,at=at,key=key,
         gold=value.gold,artifacts=value.artifacts,source=value.source,
+        recipient=recipient,recipientSource=ownership,
         queued=os.clock(),goldDone=false,artifactDone=false}
     log("DESTRUCTION queued "..key.." gold="..value.gold.." artifacts="..
         value.artifacts.." source="..value.source.." from="..origin)
@@ -1292,18 +1409,42 @@ local function processDropQueue()
         if true then
             local done=true
             if job.gold>0 and not job.goldDone then
-                job.goldDone=spawnMoney(job.world,job.at,goldClass,job.gold,"Gold")
-                if job.goldDone then
-                    log("DROP gold="..job.gold.." "..job.key)
-                else done=false end
+                if valid(job.recipient) and not job.goldDirectTried then
+                    job.goldDirectTried=true
+                    job.goldDone=creditReward(job.recipient,"Gold",job.gold)
+                    if job.goldDone then
+                        log("DIRECT REWARD Gold="..job.gold..
+                            " to="..tostring(path(job.recipient))..
+                            " via="..job.recipientSource)
+                    end
+                end
+                if not job.goldDone then
+                    job.goldDone=spawnMoney(job.world,job.at,goldClass,job.gold,"Gold")
+                    if job.goldDone then
+                        log("DROP gold="..job.gold.." "..job.key..
+                            " reason="..tostring(job.recipientSource))
+                    else done=false end
+                end
             end
             if job.artifacts>0 and not job.artifactDone then
-                local offset={X=job.at.X+65,Y=job.at.Y,Z=job.at.Z+25}
-                job.artifactDone=spawnMoney(job.world,offset,artifactClass,
-                    job.artifacts,"Artifacts")
-                if job.artifactDone then
-                    log("DROP artifacts="..job.artifacts.." "..job.key)
-                else done=false end
+                if valid(job.recipient) and not job.artifactsDirectTried then
+                    job.artifactsDirectTried=true
+                    job.artifactDone=creditReward(job.recipient,"Artifacts",job.artifacts)
+                    if job.artifactDone then
+                        log("DIRECT REWARD Artifacts="..job.artifacts..
+                            " to="..tostring(path(job.recipient))..
+                            " via="..job.recipientSource)
+                    end
+                end
+                if not job.artifactDone then
+                    local offset={X=job.at.X+65,Y=job.at.Y,Z=job.at.Z+25}
+                    job.artifactDone=spawnMoney(job.world,offset,artifactClass,
+                        job.artifacts,"Artifacts")
+                    if job.artifactDone then
+                        log("DROP artifacts="..job.artifacts.." "..job.key..
+                            " reason="..tostring(job.recipientSource))
+                    else done=false end
+                end
             end
             if done or job.attempts>=10 then
                 if not done then
@@ -1445,6 +1586,12 @@ local function repairElevator(ctx)
 end
 
 local function poll()
+    S.pollCycle=S.pollCycle+1
+    if S.pollCycle%20==0 then
+        for key,hit in pairs(S.damageHits) do
+            if S.pollCycle-hit.tick>3 then S.damageHits[key]=nil end
+        end
+    end
     local now=os.clock()
     local host=onHost()
     local ctx=host and game()
@@ -1657,6 +1804,30 @@ if CFG.EnableNoPermadeath then
             if valid(machine) and path(machine)==path(unwrap(context)) then return true end
         end))
 end
+-- Damage ownership hooks are event-driven, not per animation frame.
+-- These reflected callbacks carry the actual target actor.
+if CFG.DirectFurnitureRewards then
+    hook("/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin",
+        safePre("damage overlap",function(component,overlap,otherActor)
+            local box=unwrap(component)
+            if S.phase~=2 or not valid(box) or
+               get(box,"bDamageActive")~=true then return end
+            local source
+            pcall(function() source=box:GetOwner() end)
+            recordDamage(unwrap(otherActor),ownerController(source),"active-melee-overlap")
+        end))
+    hook("/Script/Helden.HeldenProjectile:OnDamagedActor",
+        safePre("projectile hit",function(projectile,overlap,otherActor)
+            if S.phase~=2 then return end
+            local source=unwrap(projectile)
+            local pc
+            if valid(source) then
+                pcall(function() pc=source:GetInstigatorController() end)
+            end
+            if not valid(pc) then pc=ownerController(source) end
+            recordDamage(unwrap(otherActor),pc,"projectile-hit")
+        end))
+end
 -- Capture the destruction signal from the engine, not keyboard actions.
 -- Health==0 handles direct damage. Multicast catches non-health-based breakage.
 hook("/Script/Helden.HeldenPhysicsActor:OnHealthModifed",
@@ -1664,8 +1835,10 @@ hook("/Script/Helden.HeldenPhysicsActor:OnHealthModifed",
      safePre("health post",function(context) destructionEvent(context,"health") end))
 hook("/Script/Helden.HeldenPhysicsActor:PlayDestructionEffect_Mulitcast",
      safePre("destruction",function(context) destructionEvent(context,"effect") end))
+local lastSlowPoll=-1000
 local function safePoll(onTimer)
-    local now=os.clock()
+    local started=os.clock()
+    local now=started
     -- The engine-thread delayed loop already throttles callbacks. os.clock
     -- measures CPU time on Windows and must NOT gate that loop; otherwise
     -- pauses/slow frames can postpone a respawn until after party wipe.
@@ -1676,6 +1849,13 @@ local function safePoll(onTimer)
     S.lastPoll=now
     retryHooks()
     local ok,err=pcall(poll)
+    local finished=os.clock()
+    if finished-started>=CFG.SlowPollWarnSeconds and
+       finished-lastSlowPoll>=5 then
+        lastSlowPoll=finished
+        log(string.format("PERF slow Expedition poll CPU=%.1fms",
+            (finished-started)*1000))
+    end
     if not ok and not S.warned then
         S.warned=true;log("poll error: "..tostring(err))
     end
