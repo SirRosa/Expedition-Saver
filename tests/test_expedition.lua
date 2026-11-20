@@ -6,8 +6,9 @@ local function actor(fields)
     function a:GetFullName() return self._name or tostring(self) end
     return a
 end
-local function fixture()
+local function fixture(useCoinNotifications)
     local now=0
+    local coinCallbacks={}
     local registry,hooks,keys,files,logs,spawned={},{},{},{},{},{}
     local counts={clock=0,first=0,all=0,byClass={},respawn=0,teleport=0}
     local gm=actor({_name="GameMode /Game/GM"})
@@ -190,6 +191,9 @@ local function fixture()
             hooks[name]={pre=pre,post=post}
             return 100,101
         end,
+        NotifyOnNewObject=useCoinNotifications and function(name,callback)
+            coinCallbacks[name]=callback
+        end or nil,
         RegisterKeyBind=function(key,callback) keys[key]=callback end,
         Key={F7=118},
         LoopInGameThreadWithDelay=function(ms,callback)
@@ -206,6 +210,7 @@ local function fixture()
         pc=pc,corpse=corpse,newPawn=newPawn,item=item,loot=loot,
         world=world,registry=registry,listing=listing,spawned=spawned,
         hooks=hooks,keys=keys,logs=logs,files=files,counts=counts,
+        coinCallbacks=coinCallbacks,
         tick=function(dt) now=now+(dt or 0.7);clockcb() end,
         killed=function()
             local h=hooks["/Script/Helden.HeldenCharacter:Die_Auth"]
@@ -1188,6 +1193,67 @@ test("native death coin cleanup does not rescan the whole world every poll",func
     local count=t.counts.byClass.HeldenPhysicsCoin or 0
     assert(count<=7,"death cleanup should use a bounded 2.4s scan cadence")
     assert(t.newPawn.Money.Gold==80 and t.newPawn.Money.Artifacts==4)
+end)
+
+test("Story convertible scrap value yields Gold even with zero native Gold payout",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.registry.HeldenDataSingleton=nil
+    function t.loot:GetInspectData()
+        return {bIsInDungeon=false,Quality=1,XP=8,
+            Value={Gold=0,Artifacts=0,Scraps=12}}
+    end
+    t.tick(0);t.destroyLoot(true);t.tick(0)
+    assert(#t.spawned==0,"the reward is always credited to wallet")
+    assert(t.corpse.Money.Gold==116,
+        "valuable furniture with 12 scraps should grant 36 Gold")
+    assert(t.corpse.Money.Artifacts==5,
+        "rare furniture should grant one Artifact Coin")
+    assert(t.corpse.Money.Scraps==17,"native scraps must be unchanged")
+end)
+
+test("Story XP value can fund Gold when item has no money or scrap field",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.registry.HeldenDataSingleton=nil
+    function t.loot:GetInspectData()
+        return {bIsInDungeon=false,XP=24,Quality=0,
+            Value={Gold=0,Artifacts=0,Scraps=0}}
+    end
+    t.tick(0);t.destroyLoot(true);t.tick(0)
+    assert(t.corpse.Money.Gold==84 and t.corpse.Money.Artifacts==4)
+    assert(#t.spawned==0)
+end)
+
+test("Story no-value item cannot create arbitrary currencies",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.registry.HeldenDataSingleton=nil
+    function t.loot:GetInspectData()
+        return {bIsInDungeon=false,XP=0,Quality=0,
+            Value={Gold=0,Artifacts=0,Scraps=0}}
+    end
+    t.tick(0);t.destroyLoot(true);t.tick(0)
+    assert(t.corpse.Money.Gold==80 and t.corpse.Money.Artifacts==4)
+end)
+
+test("nonexistent HeldenDamageBox overlap hook is never registered",function()
+    local t=fixture()
+    assert(t.hooks["/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin"]==nil)
+    t.tick(0)
+    assert(t.hooks["/Script/Helden.HeldenProjectile:OnDamagedActor"],
+        "valid projectile hook must remain")
+end)
+
+test("coin construction notifications replace all recurring global baseline scans",function()
+    local t=fixture(true)
+    local notify=t.coinCallbacks["/Script/Helden.HeldenPhysicsCoin"]
+    assert(notify,"UE4SS coin object notification should register once")
+    t.tick(0)
+    local first=t.counts.byClass.HeldenPhysicsCoin or 0
+    for i=1,90 do t.tick(0) end
+    assert((t.counts.byClass.HeldenPhysicsCoin or 0)==first,
+        "healthy Story gameplay must never issue a repeating registry sweep")
 end)
 
 print("ALL TESTS PASSED ("..passed..")")
