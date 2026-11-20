@@ -1,4 +1,4 @@
--- Expedition Saver v0.5.0-alpha | Grain Rot (Helden / UE4SS 3.x)
+-- Expedition Saver v0.7.0 story + expedition respawn and currency | Helden / UE4SS 3.x
 -- Host-authoritative only. This mod is EXPERIMENTAL; back up the save.
 -- The latest 2026-11-20 USMAP confirms fields and reflected signatures,
 -- not the exact native save/death sequence. Every mutation is checked.
@@ -13,8 +13,16 @@ local CFG = {
     InventoryRecoveryRetryTicks = 6,
     MaxInventoryRecoveryTicks = 24,
     EnableMoneyRecovery = true,
+    CleanupNativeDeathCoins = true, -- strictly proven currency drops, NEVER equipment
+    DeathCoinRadius = 240, -- centimeters
+    DeathCoinMaxAgeSeconds = 30,
+    DeathCoinScanTicks = 100, -- watch currency drops for 30 seconds
     EnableNoPermadeath = true,
     EnablePhysicalCoins = true,
+    DirectFurnitureRewards = true, -- wallet credit to verified or uniquely close destroyer
+    RewardNearbyPlayerRadius = 280, -- 2.8 m, solo melee reach only
+    SlowPollWarnSeconds = 0.035,
+    CoinBaselineEveryPolls = 4, -- preserve strict pre-death baseline for anti-duplication
     RespawnDelaySeconds = 0.15,
     RespawnRetrySeconds = 1.5,
     MaxRespawnRequests = 3,
@@ -80,6 +88,7 @@ local function enum(v)
     local n=tonumber(s)
     if n then return n end
     if s:find("Expedition",1,true) then return 1 end
+    if s:find("Story",1,true) then return 0 end
     if s:find("Exploring",1,true) then return 2 end
     if s:find("EndScreen",1,true) then return 3 end
     if s:find("ElevatorRideDown",1,true) then return 1 end
@@ -161,31 +170,45 @@ end
 local function onHost()
     return valid(first("HeldenGameMode")) or valid(first("GameModeBase"))
 end
+-- Both modes use the same HeldenPlayerController / Character APIs.
+-- EHeldenGameMode.Default=0 (Story), Expedition=1. Story may not have an
+-- active CurrentDungeonRun, so only Expedition mechanics require that struct.
 local function game()
     local gi=first("HeldenGameInstance")
     local gs=first("HeldenGameState")
     local save=gi and get(gi,"CurrentSaveGame")
     if not valid(gs) or not valid(save) then return nil end
-    -- Do not touch the normal game. GameModeType is the authoritative check.
     local gm=enum(get(gs,"GameModeType"))
     local sg=enum(get(save,"GameMode"))
     local metadataMode=enum(get(get(save,"MetaData"),"GameMode"))
-    -- Some transitions leave GameState.GameModeType unset while the
-    -- underlying SaveGame still identifies a valid Expedition. Require two
-    -- independent saved indicators if the live GameState disagrees.
-    if gm~=1 and (sg==1 or metadataMode==1) then
-        -- FindFirstOf may point to a stale GameState from the menu or prior
-        -- level. Prefer an actually live Expedition state when one exists.
+    local function modeKnown(n) return n==0 or n==1 end
+    if not modeKnown(sg) and not modeKnown(metadataMode) and
+       not modeKnown(gm) then return nil end
+    -- During transitions, the saved mode may be ahead of a stale GameState.
+    -- Require agreement between both persisted values before overriding it.
+    if modeKnown(sg) and modeKnown(metadataMode) and
+       sg~=metadataMode then return nil end
+    local expected
+    if modeKnown(sg) and sg==metadataMode then expected=sg
+    elseif modeKnown(sg) and gm==sg then expected=sg
+    elseif modeKnown(metadataMode) and gm==metadataMode then
+        expected=metadataMode
+    elseif modeKnown(gm) then expected=gm
+    end
+    if not modeKnown(expected) then return nil end
+    if gm~=expected then
         for _,candidate in ipairs(all("HeldenGameState")) do
-            if valid(candidate) and enum(get(candidate,"GameModeType"))==1 then
-                gs=candidate;cache.HeldenGameState=candidate;gm=1;break
+            if valid(candidate) and enum(get(candidate,"GameModeType"))==expected then
+                gs=candidate;cache.HeldenGameState=candidate;gm=expected;break
             end
         end
+        if gm~=expected and not
+           (sg==expected and metadataMode==expected) then return nil end
     end
-    if gm~=1 and not (sg==1 and metadataMode==1) then return nil end
     local run=get(gs,"CurrentDungeonRun")
-    if not run then return nil end
+    if expected==1 and not run then return nil end
     return {gi=gi,gs=gs,save=save,run=run,
+        mode=expected,isStory=expected==0,isExpedition=expected==1,
         phase=enum(get(run,"State")) or 0,
         failed=failure(get(run,"Flags"))}
 end
@@ -201,8 +224,18 @@ local S={
     deathEvents=0,newPawnEvents=0,rewardEvents=0,rawDeathEvents=0,rawDestroyEvents=0,heartbeatTicks=1000,machineRepairCycle=1000,
     players={},recoveries={},observedDeaths=0,failedBarriers=0,coinsLocated=0,
     unresolvedTreasureLogs=0,
-    failureChecks=0
+    damageHits={},attackIntents={},pollCycle=0,
+    gearScanTick=-1,gearScanObjects={},
+    coinBaseline={},coinBaselineCycle=0,coinBaselineReady=false,
+    currencyCleanup={},claimedDeathCoins={},
+    failureChecks=0,
+    mode=nil
 }
+local function deathAllowed(ctx)
+    return ctx~=nil and
+        (ctx.isStory or (ctx.isExpedition and
+            (ctx.phase==2 or (ctx.phase==3 and (S.active or ctx.failed)))))
+end
 local function backupFile(slot)
     if not CFG.BackupFile then return nil end
     local base
@@ -246,7 +279,9 @@ local function resetForSave(ctx,key,slot)
     local oldPending=S.pending
     local oldPlayers=S.players
     local oldRecoveries=S.recoveries
-    local preserve=oldSlot==slot and (S.recoveryRequired or S.active or next(oldPending)~=nil)
+    local oldCurrencyCleanup=S.currencyCleanup
+    local preserve=oldSlot==slot and S.mode==ctx.mode and
+        (S.recoveryRequired or S.active or next(oldPending)~=nil)
     local oldDepth,oldSeed,oldOffset,oldActive,oldFailed=
         S.depth,S.highestSeed,S.offset,S.active,S.failed
     S.slot=slot;S.saveKey=key
@@ -259,18 +294,26 @@ local function resetForSave(ctx,key,slot)
     S.phase=nil;S.pending=preserve and oldPending or {};S.coinLedger={}
     S.players=preserve and oldPlayers or {}
     S.recoveries=preserve and oldRecoveries or {}
+    S.currencyCleanup=preserve and oldCurrencyCleanup or {}
+    S.coinBaseline={};S.coinBaselineCycle=0;S.coinBaselineReady=false
+    S.claimedDeathCoins={}
+    S.damageHits={};S.attackIntents={};S.pollCycle=0
+    S.gearScanTick=-1;S.gearScanObjects={}
     S.nextBackupDepth=-1
     S.dropQueue={};S.destructionSeen={}
     S.nextMachineRepair=0;S.machineRepairAttempts=0
     local time=number(get(ctx.save,"TimePlayed"),0,1000000000)
     local fails=number(get(ctx.save,"DungeonFails"),0,1000000000)
-    local recovered=readBackup(slot,time,fails)
-    if recovered and recovered>S.depth then S.depth=recovered end
-    log("Expedition slot "..slot.." loaded; protected depth "..S.depth..
+    if ctx.isExpedition then
+        local recovered=readBackup(slot,time,fails)
+        if recovered and recovered>S.depth then S.depth=recovered end
+    end
+    log((ctx.isStory and "Story" or "Expedition").." slot "..slot..
+        " loaded; protected depth "..S.depth..
         " retainedRunState="..tostring(preserve))
 end
 local function keepExpedition(ctx)
-    if not CFG.EnableNoPermadeath then return end
+    if not ctx.isExpedition or not CFG.EnableNoPermadeath then return end
     -- EndScreen+Failed is sufficient even when no previous Exploring poll ran.
     if ctx.phase==3 and ctx.failed then
         if not S.recoveryRequired then log("RECOVERY detected directly from EndScreen/Failed") end
@@ -366,7 +409,178 @@ local function recoverMoney(pawn,entry)
     end
     return verified
 end
-local function gearOf(char)
+-- Record coin actors while players are alive. Unlike inventory items, these
+-- baseline refs are never mutated or destroyed and impose no per-frame hook.
+local function snapshotExistingCoins()
+    if not CFG.CleanupNativeDeathCoins then return end
+    local existing={}
+    for _,coin in ipairs(all("HeldenPhysicsCoin")) do
+        if valid(coin) then
+            local id=path(coin)
+            if id then existing[id]=true end
+        end
+    end
+    S.coinBaseline=existing
+    S.coinBaselineReady=true
+end
+
+-- Native death coins can remain in the dungeon after the wallet is restored.
+-- Only zero and destroy a *complete exact match* of new physical coins close
+-- to the death point, after checking the new player already owns the money.
+-- Never touch equipable items, normal pickups, or unrelated coins.
+local function processCurrencyCleanup()
+    if not CFG.CleanupNativeDeathCoins or not CFG.EnableMoneyRecovery or
+       not onHost() then return end
+    for key,job in pairs(S.currencyCleanup) do
+        job.ticks=job.ticks+1
+        if not valid(job.pawn) or not job.at then
+            S.currencyCleanup[key]=nil
+        else
+            -- Wallet must be credited *before* a physical coin can be removed.
+            -- A partial native drop (e.g. Gold+Artifacts without Scraps)
+            -- is completely legitimate; requiring an exact 3-field total
+            -- previously left all physical coins on the floor.
+            local wallet=snapshotMoney(job.pawn)
+            local funded=wallet~=nil
+            for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
+                if not wallet or wallet[currency]<(job.money[currency] or 0) then
+                    funded=false
+                end
+            end
+            if funded then
+                local newCoins=0
+                for _,coin in ipairs(all("HeldenPhysicsCoin")) do
+                    if valid(coin) then
+                        local id=path(coin)
+                        if id and not job.oldCoins[id] and
+                           not S.claimedDeathCoins[id] and
+                           not id:find("Default__",1,true) then
+                            local at=location(coin)
+                            if at and distance2(at,job.at)<=
+                               CFG.DeathCoinRadius*CFG.DeathCoinRadius then
+                                local age
+                                pcall(function()
+                                    age=coin:GetGameTimeSinceCreation()
+                                end)
+                                if type(age)=="number" and age>=0 and
+                                   age<=CFG.DeathCoinMaxAgeSeconds then
+                                    local world
+                                    pcall(function() world=coin:GetWorld() end)
+                                    local sameWorld=not job.world or
+                                        (valid(world) and path(world)==job.world)
+                                    -- A coin explicitly owned/instigated by
+                                    -- another player or object is NOT death loot.
+                                    local owner,instigator
+                                    pcall(function() owner=coin:GetOwner() end)
+                                    pcall(function()
+                                        instigator=coin:GetInstigatorController()
+                                    end)
+                                    local ownerId=valid(owner) and path(owner)
+                                    local instId=valid(instigator) and path(instigator)
+                                    local hasForeignOwner=(ownerId and
+                                        ownerId~=job.oldChar and
+                                        ownerId~=job.controller) or
+                                        (instId and instId~=job.controller)
+                                    if sameWorld and not hasForeignOwner then
+                                        local m=get(coin,"Money")
+                                        local amounts={}
+                                        local safe=m~=nil
+                                        local positive=false
+                                        for _,currency in ipairs(
+                                            {"Gold","Artifacts","Scraps"}) do
+                                            local n=number(get(m,currency),0,100000000)
+                                            if n==nil then safe=false end
+                                            amounts[currency]=n or 0
+                                            if n and n>0 then positive=true end
+                                            if n and n>
+                                                (job.money[currency] or 0)-
+                                                (job.removed[currency] or 0) then
+                                                safe=false
+                                            end
+                                        end
+                                        if safe and positive then
+                                            newCoins=newCoins+1
+                                            -- Clear native Money on the actor
+                                            -- FIRST so a destroy replication
+                                            -- delay cannot create a second
+                                            -- collectible payout.
+                                            local zero=true
+                                            for _,currency in ipairs(
+                                                {"Gold","Artifacts","Scraps"}) do
+                                                if not put(m,currency,0) then
+                                                    zero=false
+                                                end
+                                            end
+                                            local actual=get(coin,"Money")
+                                            for _,currency in ipairs(
+                                                {"Gold","Artifacts","Scraps"}) do
+                                                if number(get(actual,currency),
+                                                    0,100000000)~=0 then
+                                                    zero=false
+                                                end
+                                            end
+                                            if not zero then
+                                                put(coin,"Money",{
+                                                    Gold=0,Artifacts=0,Scraps=0
+                                                })
+                                                actual=get(coin,"Money")
+                                                zero=true
+                                                for _,currency in ipairs(
+                                                    {"Gold","Artifacts","Scraps"}) do
+                                                    if number(get(actual,currency),
+                                                        0,100000000)~=0 then
+                                                        zero=false
+                                                    end
+                                                end
+                                            end
+                                            if zero then
+                                                S.claimedDeathCoins[id]=true
+                                                for _,currency in ipairs(
+                                                    {"Gold","Artifacts","Scraps"}) do
+                                                    job.removed[currency]=
+                                                        job.removed[currency]+
+                                                        amounts[currency]
+                                                end
+                                                local ok=pcall(function()
+                                                    coin:K2_DestroyActor()
+                                                end)
+                                                job.cleared=job.cleared+1
+                                                log("DEATH COINS REMOVED "..id..
+                                                    " Gold="..amounts.Gold..
+                                                    " Artifacts="..amounts.Artifacts..
+                                                    " Scraps="..amounts.Scraps..
+                                                    " destroyed="..tostring(ok))
+                                            else
+                                                job.rejected=job.rejected+1
+                                                log("DEATH COINS: unable to zero "..
+                                                    id.."; not destroyed")
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            local full=job.removed.Gold==job.money.Gold and
+                job.removed.Artifacts==job.money.Artifacts and
+                job.removed.Scraps==job.money.Scraps
+            if full or job.ticks>=CFG.DeathCoinScanTicks then
+                log("DEATH COINS RESULT removed="..job.cleared..
+                    " Gold="..job.removed.Gold..
+                    " Artifacts="..job.removed.Artifacts..
+                    " Scraps="..job.removed.Scraps..
+                    " nativeDropMayBePartial="..tostring(not full)..
+                    " errors="..job.rejected..
+                    " itemsUntouched=true")
+                S.currencyCleanup[key]=nil
+            end
+        end
+    end
+end
+
+local function gearOf(char,forceFresh)
     if not valid(char) then return {} end
     local result,seen={},{}
     local function add(item,source,slotIndex)
@@ -395,7 +609,13 @@ local function gearOf(char)
         if valid(slot) then add(get(slot,"CurrentItemInSlot"),"ItemSlots",i-1) end
     end)
     local owner=path(char)
-    for _,item in ipairs(all("HeldenEquipableItem")) do
+    -- At most one UObject-wide equipment scan per game-thread poll,
+    -- shared by all co-op players. An actual death requests a fresh list.
+    if forceFresh or S.gearScanTick~=S.pollCycle then
+        S.gearScanTick=S.pollCycle
+        S.gearScanObjects=all("HeldenEquipableItem")
+    end
+    for _,item in ipairs(S.gearScanObjects) do
         if valid(item) and path(get(item,"PreviousOwner"))==owner and
            valid(get(item,"CurrentSlot")) then
             add(item,"PreviousOwner")
@@ -417,7 +637,7 @@ end
 local function queuePlayerDeath(pc,char,snapshot,reason)
     if not CFG.EnableRespawn or not onHost() then return false end
     local ctx=game()
-    if not ctx or not (ctx.phase==2 or (ctx.phase==3 and (S.active or ctx.failed))) then return false end
+    if not deathAllowed(ctx) then return false end
     if not valid(pc) or (not valid(char) and snapshot==nil) then return false end
     local key=path(pc)
     if not key or S.pending[key] then return false end
@@ -426,17 +646,28 @@ local function queuePlayerDeath(pc,char,snapshot,reason)
         if path(candidate)==key then player=true;break end
     end
     if not player then return false end
-    local inv=snapshot or gearOf(char)
+    local inv=snapshot or gearOf(char,true)
     local tracked=S.players[key]
     local cash=(tracked and tracked.money) or snapshotMoney(char)
+    local deathPos=(tracked and tracked.lastLocation) or location(char)
+    local worldName=tracked and tracked.lastWorld
+    if not worldName and valid(char) then
+        local w
+        pcall(function() w=char:GetWorld() end)
+        if valid(w) then worldName=path(w) end
+    end
+    local oldCoins={}
+    for id in pairs(S.coinBaseline) do oldCoins[id]=true end
     S.pending[key]={controller=pc,oldChar=char,gear=inv,money=cash,
         started=os.clock(),ageTicks=0,attempts=0,nextRequestTick=0,
-        spawned=nil,delivered=false}
+        deathPos=deathPos,deathWorld=worldName,oldCoins=oldCoins,
+        baselineReady=S.coinBaselineReady,
+        mode=ctx.mode,spawned=nil,delivered=false}
     S.deathEvents=S.deathEvents+1
     log("PLAYER DEATH queued from "..tostring(reason).." controller="..key..
         " oldPawn="..tostring(path(char)).." retained="..#inv..
         " cash="..(cash and (cash.Gold.."/"..cash.Artifacts.."/"..cash.Scraps) or "nil")..
-        " phase="..ctx.phase)
+        " phase="..ctx.phase.." mode="..ctx.mode)
     return true
 end
 local function captureDeath(char)
@@ -446,15 +677,16 @@ local function captureDeath(char)
     if valid(pc) then queuePlayerDeath(pc,char,nil,"Die_Auth") end
 end
 local function monitorPlayers(ctx)
-    if not CFG.EnableRespawn or not (ctx.phase==2 or
-        (ctx.phase==3 and (ctx.failed or S.active))) then return end
+    if not CFG.EnableRespawn or not deathAllowed(ctx) then return end
+    local anyAlive=false
     for _,pc in ipairs(all("HeldenPlayerController")) do
         if valid(pc) then
             local key=path(pc)
             local tracking=S.players[key]
             if not tracking then
                 tracking={alive=false,dead=false,lastPawn=nil,gear={},money=nil,
-                    snapshotCycle=0,lastState=nil,lastHealth=nil}
+                    snapshotCycle=0,lastState=nil,lastHealth=nil,
+                    lastLocation=nil,lastWorld=nil}
                 S.players[key]=tracking
             end
             local pawn=currentPawn(pc)
@@ -476,7 +708,8 @@ local function monitorPlayers(ctx)
             local state=enum(get(char,"CharacterState"))
             local isSoul=valid(soul) and valid(pawn) and path(soul)==path(pawn)
             local dead=(state==1 or (health and health<=0) or isSoul or
-                (tracking.alive and ctx.phase==3 and ctx.failed))
+                (ctx.isExpedition and tracking.alive and
+                 ctx.phase==3 and ctx.failed))
             local activeCharacter=valid(char) and not dead and health and health>0
             if tracking.lastState~=state or tracking.lastHealth~=nil and
                     health and ((tracking.lastHealth>0)~=(health>0)) then
@@ -487,8 +720,13 @@ local function monitorPlayers(ctx)
             tracking.lastState=state
             tracking.lastHealth=health
             if activeCharacter then
+                anyAlive=true
                 tracking.lastPawn=char
                 tracking.money=snapshotMoney(char) or tracking.money
+                tracking.lastLocation=location(char) or tracking.lastLocation
+                local w
+                pcall(function() w=char:GetWorld() end)
+                if valid(w) then tracking.lastWorld=path(w) end
                 tracking.alive=true
                 tracking.dead=false
                 tracking.snapshotCycle=tracking.snapshotCycle+1
@@ -508,15 +746,42 @@ local function monitorPlayers(ctx)
             end
         end
     end
+    -- One registry scan at most every 4 poll cycles, regardless of player count.
+    if anyAlive then
+        S.coinBaselineCycle=S.coinBaselineCycle+1
+        if not S.coinBaselineReady or
+           S.coinBaselineCycle>=CFG.CoinBaselineEveryPolls then
+            S.coinBaselineCycle=0
+            snapshotExistingCoins()
+        end
+    end
 end
 
-local function respawnLocation()
+-- Story can have no DungeonElevator; preserve native Story spawn position
+-- when available, and only revive the old pawn at a real player start.
+local function respawnLocation(entry,newPawn)
+    local story=entry and entry.mode==0
     local lift=first("HeldenDungeonElevator")
-    if not valid(lift) then return nil end
-    local comp=get(lift,"InteriorCollisionBox")
-    local loc=location(comp) or location(lift)
-    if not loc then return nil end
-    return {X=loc.X,Y=loc.Y,Z=loc.Z+80}
+    if not valid(lift) and story then lift=first("HeldenElevator") end
+    if valid(lift) then
+        local comp=get(lift,"InteriorCollisionBox")
+        local loc=location(comp) or location(lift)
+        if loc then return {X=loc.X,Y=loc.Y,Z=loc.Z+80} end
+    end
+    if not story then return nil end
+    if valid(newPawn) and
+       path(newPawn)~=path(entry and entry.oldChar) then
+        local at=location(newPawn)
+        if at then return at end
+    end
+    local spawn=first("PlayerStart")
+    local at=location(spawn)
+    if at then return {X=at.X,Y=at.Y,Z=at.Z+80} end
+    -- No valid spawn object: the last *known alive* location is preferable
+    -- to a blind 0,0,0 teleport. Native respawn remains first preference.
+    local last=entry and entry.deathPos
+    if last then return {X=last.X,Y=last.Y,Z=last.Z+100} end
+    return nil
 end
 local function heal(pawn)
     local stats=get(pawn,"CharacterStats")
@@ -554,12 +819,31 @@ local function ownsItem(pawn,item)
         valid(get(item,"CurrentSlot"))
 end
 local function collectAtElevator(entry,dest,pawn)
-    if not CFG.EnableItemRecovery then return end
     local key=path(entry.controller)
     if not key then return end
-    S.recoveries[key]={entry=entry,dest=dest,pawn=pawn,tick=0,
-        done={},attempts={},recreated={},warnings={}}
+    -- Money restoration and anti-duplication must NOT depend on the
+    -- separate gear-recovery feature flag.
+    if CFG.EnableItemRecovery and #entry.gear>0 then
+        S.recoveries[key]={entry=entry,dest=dest,pawn=pawn,tick=0,
+            done={},attempts={},recreated={},warnings={}}
+    end
     recoverMoney(pawn,entry)
+    if CFG.CleanupNativeDeathCoins and CFG.EnableMoneyRecovery and
+       entry.baselineReady and entry.money and entry.deathPos and
+       ((entry.money.Gold or 0)>0 or (entry.money.Artifacts or 0)>0 or
+        (entry.money.Scraps or 0)>0) then
+        S.currencyCleanup[key]={
+            pawn=pawn,money=entry.money,at=entry.deathPos,
+            oldCoins=entry.oldCoins or {},world=entry.deathWorld,ticks=0,
+            controller=key,oldChar=path(entry.oldChar),removed={Gold=0,Artifacts=0,Scraps=0},
+            cleared=0,rejected=0
+        }
+        log("DEATH COINS tracking death location "..
+            string.format("%.0f/%.0f/%.0f",entry.deathPos.X,
+                entry.deathPos.Y,entry.deathPos.Z)..
+            " Gold="..entry.money.Gold.." Artifacts="..entry.money.Artifacts..
+            " Scraps="..entry.money.Scraps)
+    end
     log("INVENTORY RECOVERY queued items="..#entry.gear..
         " cash="..(entry.money and
             entry.money.Gold.."/"..entry.money.Artifacts.."/"..entry.money.Scraps or "unknown"))
@@ -720,9 +1004,9 @@ local function reviveOldPawn(entry)
     if not CFG.EnableExistingPawnReviveFallback then return false end
     local char,pc=entry.oldChar,entry.controller
     if not valid(char) or not valid(pc) then return false end
-    local at=respawnLocation()
+    local at=respawnLocation(entry,char)
     if not at then
-        log("REVIVE FALLBACK: elevator location unavailable")
+        log("REVIVE FALLBACK: no safe Story/Expedition spawn location")
         return false
     end
     -- A native respawn is always attempted first. After it fails, re-enable
@@ -770,7 +1054,7 @@ local function processDeaths(ctx)
             local isSoul=valid(soul) and valid(pawn) and path(soul)==path(pawn)
             if pawn and not isSoul and path(pawn)~=path(entry.oldChar) and
                valid(get(pawn,"CharacterStats")) then
-                local at=respawnLocation()
+                local at=respawnLocation(entry,pawn)
                 if at and teleport(pawn,at) then
                     local healed=heal(pawn)
                     collectAtElevator(entry,at,pawn)
@@ -859,7 +1143,7 @@ local function lootValue(actor)
     local inspected
     local inspectedZero
     pcall(function() inspected=actor:GetInspectData() end)
-    if inspected and get(inspected,"bIsInDungeon")==true then
+    if inspected and (get(inspected,"bIsInDungeon")==true or S.mode==0) then
         local value=get(inspected,"Value")
         if value then
             local gold=number(get(value,"Gold"),0,CFG.MaxCoinsPerDrop) or 0
@@ -943,6 +1227,147 @@ local function lootValue(actor)
     end
     return inspectedZero
 end
+-- The destroyed actor's GetInstigatorController() describes the actor's
+-- OWN creation context, not necessarily the attacking player. Never credit
+-- it as damage evidence. Track actual active damage overlaps and projectile
+-- damage instead, matching player-controlled attack owners to the target.
+local function ownerController(source)
+    source=unwrap(source)
+    if not valid(source) then return nil end
+    local ids={}
+    local obj=source
+    for _=1,4 do
+        if not valid(obj) then break end
+        local id=path(obj)
+        if not id or ids[id] then break end
+        ids[id]=true
+        local previous=get(obj,"PreviousOwner")
+        local nextObj
+        if valid(previous) then nextObj=previous
+        else pcall(function() nextObj=obj:GetOwner() end) end
+        obj=nextObj
+    end
+    local pcList=all("HeldenPlayerController")
+    for _,pc in ipairs(pcList) do
+        if valid(pc) then
+            local pawn=currentPawn(pc)
+            if valid(pawn) and ids[path(pawn)] then return pc end
+        end
+    end
+    return nil
+end
+
+local function recordDamage(target,pc,kind)
+    if not (S.mode==0 or S.phase==2) or
+       not valid(target) or not valid(pc) or
+       not valid(get(target,"StatsComponent")) then return end
+    local key,player=path(target),path(pc)
+    if not key or not player then return end
+    local prev=S.damageHits[key]
+    if prev and S.pollCycle-prev.tick<=2 and
+       prev.player~=player then
+        prev.ambiguous=true
+        prev.tick=S.pollCycle
+    else
+        S.damageHits[key]={player=player,tick=S.pollCycle,kind=kind,
+            ambiguous=(prev and S.pollCycle-prev.tick<=2 and
+                prev.ambiguous) or false}
+    end
+end
+
+local function recordAttackIntent(weapon)
+    if not (S.mode==0 or S.phase==2) then return end
+    local pc=ownerController(weapon)
+    local id=valid(pc) and path(pc) or nil
+    if id then
+        S.attackIntents[id]={tick=S.pollCycle}
+    end
+end
+
+local function selectDestroyer(actor,origin)
+    if not CFG.DirectFurnitureRewards then return nil,"disabled" end
+    local key=path(actor)
+    local hit=key and S.damageHits[key] or nil
+    local recent=hit and S.pollCycle-hit.tick<=2
+    local sole,chosen,players,eligible=nil,nil,0,0
+    local close,closeCount=nil,0
+    local attacking,attackerCount=nil,0
+    local at=location(actor)
+    local rangeSq=CFG.RewardNearbyPlayerRadius^2
+    for _,pc in ipairs(all("HeldenPlayerController")) do
+        if valid(pc) then
+            players=players+1
+            local pawn=currentPawn(pc)
+            if valid(pawn) and get(pawn,"Money") then
+                eligible=eligible+1
+                if eligible==1 then sole=pawn end
+                if recent and not hit.ambiguous and path(pc)==hit.player then
+                    chosen=pawn
+                end
+                if origin=="health" and at then
+                    local pos=location(pawn)
+                    if pos and distance2(pos,at)<=rangeSq then
+                        closeCount=closeCount+1
+                        if closeCount==1 then close=pawn end
+                        local attack=S.attackIntents[path(pc)]
+                        if attack and S.pollCycle-attack.tick<=2 then
+                            attackerCount=attackerCount+1
+                            if attackerCount==1 then attacking=pawn end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if valid(chosen) then return chosen,"verified-"..hit.kind end
+    if attackerCount==1 and valid(attacking) and
+       not (recent and hit.ambiguous) then
+        return attacking,"recent-weapon-attack"
+    end
+    if attackerCount>1 then return nil,"multiple-attackers" end
+    -- If another player is dead, do not treat this as a solo session.
+    if players==1 and eligible==1 and valid(sole) then
+        return sole,"single-player"
+    end
+    -- When only one living player is close enough to physically strike the
+    -- actor, attribute a lethal health event to that player. Never pick
+    -- simply the nearest of two nearby teammates.
+    if players>1 and eligible>=2 and closeCount==1 and
+       valid(close) and not (recent and hit.ambiguous) then
+        return close,"unique-close-melee"
+    end
+    return nil,players>1 and "unverified-coop" or "no-owner"
+end
+
+local function creditReward(pawn,currency,amount)
+    if not valid(pawn) or amount<=0 then return false end
+    local money=get(pawn,"Money")
+    local old=number(get(money,currency),0,100000000)
+    if old==nil or old+amount>100000000 then return false end
+    local goal=old+amount
+    -- UE4SS can return an attached proxy or a copied UScriptStruct.
+    put(money,currency,goal)
+    local after=number(get(get(pawn,"Money"),currency),0,100000000)
+    if after~=goal and after==old then
+        local fresh=get(pawn,"Money")
+        local newMoney={}
+        for _,key in ipairs({"Gold","Artifacts","Scraps"}) do
+            newMoney[key]=number(get(fresh,key),0,100000000)
+            if newMoney[key]==nil then return false end
+        end
+        newMoney[currency]=goal
+        put(pawn,"Money",newMoney)
+        after=number(get(get(pawn,"Money"),currency),0,100000000)
+    end
+    if after==goal then
+        pcall(function() pawn:ForceNetUpdate() end)
+        return true
+    end
+    log("DIRECT REWARD not verified "..currency..
+        " expected="..goal.." actual="..tostring(after))
+    return false
+end
+
 local function destructionEvent(ctx,origin)
     S.rawDestroyEvents=S.rawDestroyEvents+1
     local a=unwrap(ctx)
@@ -950,13 +1375,20 @@ local function destructionEvent(ctx,origin)
         log("RAW DESTRUCTION "..origin.." actor="..tostring(path(a))..
             " host="..tostring(onHost()))
     end
+    -- Reject the common nonlethal hits before expensive reflected context.
+    if not (S.mode==0 or S.phase==2) or not valid(a) then return end
+    local stats=get(a,"StatsComponent")
+    if not valid(stats) then return end
+    if origin=="health" then
+        local hp=tonumber(get(stats,"CurrentHealth"))
+        if not hp or hp>0 then return end
+    end
     if not onHost() then return end
     local gameCtx=game()
-    if not gameCtx or gameCtx.phase~=2 then
-        if S.rawDestroyEvents<=10 then log("DROP SKIP: Expedition not recognized") end
+    if not gameCtx or not
+       (gameCtx.isStory or (gameCtx.isExpedition and gameCtx.phase==2)) then
         return
     end
-    if not valid(a) or not valid(get(a,"StatsComponent")) then return end
     if get(a,"bIsQuestObjective")==true or
        get(a,"bRequireQuestObjectiveToKill")==true then return end
     -- Require an actual in-dungeon loot actor; never pay for built furniture.
@@ -964,15 +1396,11 @@ local function destructionEvent(ctx,origin)
     local inspecting
     pcall(function() inspecting=a:GetInspectData() end)
     local inDungeon=inspecting and get(inspecting,"bIsInDungeon")==true
-    if not inDungeon and not valid(owning) then
+    if not gameCtx.isStory and not inDungeon and not valid(owning) then
         if S.rawDestroyEvents<=10 then
             log("DROP SKIP: no valid dungeon origin for "..tostring(path(a)))
         end
         return
-    end
-    if origin=="health" then
-        local hp=tonumber(get(get(a,"StatsComponent"),"CurrentHealth"))
-        if not hp or hp>0 then return end
     end
     local key=path(a)
     if not key or S.destructionSeen[key] then return end
@@ -994,8 +1422,10 @@ local function destructionEvent(ctx,origin)
         return
     end
     S.destructionSeen[key]=true
+    local recipient,ownership=selectDestroyer(a,origin)
     S.dropQueue[#S.dropQueue+1]={world=world,at=at,key=key,
         gold=value.gold,artifacts=value.artifacts,source=value.source,
+        recipient=recipient,recipientSource=ownership,
         queued=os.clock(),goldDone=false,artifactDone=false}
     log("DESTRUCTION queued "..key.." gold="..value.gold.." artifacts="..
         value.artifacts.." source="..value.source.." from="..origin)
@@ -1110,18 +1540,42 @@ local function processDropQueue()
         if true then
             local done=true
             if job.gold>0 and not job.goldDone then
-                job.goldDone=spawnMoney(job.world,job.at,goldClass,job.gold,"Gold")
-                if job.goldDone then
-                    log("DROP gold="..job.gold.." "..job.key)
-                else done=false end
+                if valid(job.recipient) and not job.goldDirectTried then
+                    job.goldDirectTried=true
+                    job.goldDone=creditReward(job.recipient,"Gold",job.gold)
+                    if job.goldDone then
+                        log("DIRECT REWARD Gold="..job.gold..
+                            " to="..tostring(path(job.recipient))..
+                            " via="..job.recipientSource)
+                    end
+                end
+                if not job.goldDone then
+                    job.goldDone=spawnMoney(job.world,job.at,goldClass,job.gold,"Gold")
+                    if job.goldDone then
+                        log("DROP gold="..job.gold.." "..job.key..
+                            " reason="..tostring(job.recipientSource))
+                    else done=false end
+                end
             end
             if job.artifacts>0 and not job.artifactDone then
-                local offset={X=job.at.X+65,Y=job.at.Y,Z=job.at.Z+25}
-                job.artifactDone=spawnMoney(job.world,offset,artifactClass,
-                    job.artifacts,"Artifacts")
-                if job.artifactDone then
-                    log("DROP artifacts="..job.artifacts.." "..job.key)
-                else done=false end
+                if valid(job.recipient) and not job.artifactsDirectTried then
+                    job.artifactsDirectTried=true
+                    job.artifactDone=creditReward(job.recipient,"Artifacts",job.artifacts)
+                    if job.artifactDone then
+                        log("DIRECT REWARD Artifacts="..job.artifacts..
+                            " to="..tostring(path(job.recipient))..
+                            " via="..job.recipientSource)
+                    end
+                end
+                if not job.artifactDone then
+                    local offset={X=job.at.X+65,Y=job.at.Y,Z=job.at.Z+25}
+                    job.artifactDone=spawnMoney(job.world,offset,artifactClass,
+                        job.artifacts,"Artifacts")
+                    if job.artifactDone then
+                        log("DROP artifacts="..job.artifacts.." "..job.key..
+                            " reason="..tostring(job.recipientSource))
+                    else done=false end
+                end
             end
             if done or job.attempts>=10 then
                 if not done then
@@ -1142,7 +1596,8 @@ end
 -- machine. v0.3 never touched BP_ExpeditionFailed_Actor_C; it remained solid
 -- even after GameState flags were cleared (confirmed by live object dump).
 local function repairFailedDoor(ctx)
-    if not CFG.EnableNoPermadeath or not S.recoveryRequired then return end
+    if not ctx.isExpedition or not CFG.EnableNoPermadeath or
+       not S.recoveryRequired then return end
     if ctx.phase==1 or ctx.phase==2 then return end
     local observed=0
     for _,barrier in ipairs(all("BP_ExpeditionFailed_Actor_C")) do
@@ -1193,7 +1648,8 @@ local function repairFailedDoor(ctx)
 end
 
 local function repairElevator(ctx)
-    if not CFG.EnableNoPermadeath or not S.recoveryRequired then return end
+    if not ctx.isExpedition or not CFG.EnableNoPermadeath or
+       not S.recoveryRequired then return end
     if ctx.phase==1 or ctx.phase==2 then return end
     local now=os.clock()
     S.machineRepairCycle=S.machineRepairCycle+1
@@ -1263,6 +1719,15 @@ local function repairElevator(ctx)
 end
 
 local function poll()
+    S.pollCycle=S.pollCycle+1
+    if S.pollCycle%20==0 then
+        for key,hit in pairs(S.damageHits) do
+            if S.pollCycle-hit.tick>3 then S.damageHits[key]=nil end
+        end
+        for key,attack in pairs(S.attackIntents) do
+            if S.pollCycle-attack.tick>3 then S.attackIntents[key]=nil end
+        end
+    end
     local now=os.clock()
     local host=onHost()
     local ctx=host and game()
@@ -1291,40 +1756,47 @@ local function poll()
             " failureChecks="..S.failureChecks)
     end
     if not ctx then
-        if S.lastMode~="nonexpedition" then
-            S.lastMode="nonexpedition"
-            log("inactive: missing authoritative Expedition context")
+        if S.lastMode~="no-context" then
+            S.lastMode="no-context"
+            log("inactive: missing authoritative Story/Expedition context")
         end
         return
     end
-    S.lastMode="expedition"
+    S.lastMode=ctx.isStory and "story" or "expedition"
     local md=get(ctx.save,"MetaData")
     local slot=number(get(md,"GameSlot"),0,100)
     if not slot then return end
     local key=path(ctx.save)
-    if S.slot~=slot or S.saveKey~=key then resetForSave(ctx,key,slot) end
-    keepExpedition(ctx)
+    if S.slot~=slot or S.saveKey~=key or S.mode~=ctx.mode then
+        resetForSave(ctx,key,slot)
+    end
+    S.mode=ctx.mode
+    if ctx.isExpedition then keepExpedition(ctx) end
     monitorPlayers(ctx)
     processDeaths(ctx)
     processInventoryRecoveries()
-    repairElevator(ctx)
-    repairFailedDoor(ctx)
+    processCurrencyCleanup()
+    if ctx.isExpedition then
+        repairElevator(ctx)
+        repairFailedDoor(ctx)
+    end
     processDropQueue()
-    if ctx.phase==1 or ctx.phase==2 then
+    if ctx.isExpedition and (ctx.phase==1 or ctx.phase==2) then
         if S.phase==0 or S.phase==3 then
             cache["HeldenDungeonElevator"]=nil
         end
     end
     if S.phase~=ctx.phase then
-        log("run state "..tostring(S.phase).." -> "..ctx.phase.."; depth="..S.depth)
+        log((ctx.isStory and "Story" or "Expedition")..
+            " run state "..tostring(S.phase).." -> "..ctx.phase..
+            "; depth="..S.depth)
     end
     S.phase=ctx.phase
 end
 
-local function isExpeditionDeath()
+local function isPlayableDeath()
     if not onHost() then return false end
-    local ctx=game()
-    return ctx and (ctx.phase==2 or (ctx.phase==3 and (S.active or ctx.failed)))
+    return deathAllowed(game())
 end
 local function watchDeath(context)
     S.rawDeathEvents=S.rawDeathEvents+1
@@ -1334,18 +1806,18 @@ local function watchDeath(context)
         log("RAW DIE_Auth actor="..tostring(path(character))..
             " host="..tostring(onHost())..
             " phase="..tostring(ctx and ctx.phase)..
-            " accepted="..tostring(isExpeditionDeath()))
+            " accepted="..tostring(isPlayableDeath()))
     end
-    if not valid(character) or not isExpeditionDeath() then return end
+    if not valid(character) or not isPlayableDeath() then return end
     captureDeath(character)
 end
 local function watchControllerKilled(context)
     local pc=unwrap(context)
     if valid(pc) then
         log("RAW OnPlayerKilled controller="..tostring(path(pc))..
-            " accepted="..tostring(isExpeditionDeath()))
+            " accepted="..tostring(isPlayableDeath()))
     end
-    if not valid(pc) or not isExpeditionDeath() then return end
+    if not valid(pc) or not isPlayableDeath() then return end
     local old=get(pc,"LastPlayerChar")
     if valid(old) then captureDeath(old) end
 end
@@ -1447,7 +1919,8 @@ if CFG.EnableNoPermadeath then
                 log("HAS FAILED check event host="..tostring(onHost())..
                     " ctx="..tostring(ctx and ctx.phase))
             end
-            if valid(gs) and ctx and path(ctx.gs)==path(gs) then
+            if valid(gs) and ctx and ctx.isExpedition and
+               path(ctx.gs)==path(gs) then
                 return false
             end
         end))
@@ -1455,7 +1928,8 @@ if CFG.EnableNoPermadeath then
         safePre("EndDungeonRunSequence",function(context,statsArg)
             local gs=unwrap(context)
             local ctx=onHost() and game()
-            if not ctx or path(ctx.gs)~=path(gs) then return end
+            if not ctx or not ctx.isExpedition or
+               path(ctx.gs)~=path(gs) then return end
             local stats=unwrap(statsArg)
             if get(stats,"bHaveFailed")==true then
                 S.failed=true;S.recoveryRequired=true
@@ -1469,9 +1943,38 @@ if CFG.EnableNoPermadeath then
         safePostBool(function(context)
             if not S.recoveryRequired or not onHost() then return end
             local ctx=game()
-            if not ctx or (ctx.phase~=0 and ctx.phase~=3) then return end
+            if not ctx or not ctx.isExpedition or
+               (ctx.phase~=0 and ctx.phase~=3) then return end
             local machine=first("HeldenElevatorMachine")
             if valid(machine) and path(machine)==path(unwrap(context)) then return true end
+        end))
+end
+-- Damage ownership hooks are event-driven, not per animation frame.
+-- These reflected callbacks carry the actual target actor.
+if CFG.DirectFurnitureRewards then
+    hook("/Script/Helden.HeldenWeapon:Attack_Server",
+        safePre("weapon attack",function(weapon)
+            recordAttackIntent(unwrap(weapon))
+        end))
+    hook("/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin",
+        safePre("damage overlap",function(component,overlap,otherActor)
+            local box=unwrap(component)
+            if not (S.mode==0 or S.phase==2) or not valid(box) or
+               get(box,"bDamageActive")~=true then return end
+            local source
+            pcall(function() source=box:GetOwner() end)
+            recordDamage(unwrap(otherActor),ownerController(source),"active-melee-overlap")
+        end))
+    hook("/Script/Helden.HeldenProjectile:OnDamagedActor",
+        safePre("projectile hit",function(projectile,overlap,otherActor)
+            if not (S.mode==0 or S.phase==2) then return end
+            local source=unwrap(projectile)
+            local pc
+            if valid(source) then
+                pcall(function() pc=source:GetInstigatorController() end)
+            end
+            if not valid(pc) then pc=ownerController(source) end
+            recordDamage(unwrap(otherActor),pc,"projectile-hit")
         end))
 end
 -- Capture the destruction signal from the engine, not keyboard actions.
@@ -1481,8 +1984,10 @@ hook("/Script/Helden.HeldenPhysicsActor:OnHealthModifed",
      safePre("health post",function(context) destructionEvent(context,"health") end))
 hook("/Script/Helden.HeldenPhysicsActor:PlayDestructionEffect_Mulitcast",
      safePre("destruction",function(context) destructionEvent(context,"effect") end))
+local lastSlowPoll=-1000
 local function safePoll(onTimer)
-    local now=os.clock()
+    local started=os.clock()
+    local now=started
     -- The engine-thread delayed loop already throttles callbacks. os.clock
     -- measures CPU time on Windows and must NOT gate that loop; otherwise
     -- pauses/slow frames can postpone a respawn until after party wipe.
@@ -1493,6 +1998,13 @@ local function safePoll(onTimer)
     S.lastPoll=now
     retryHooks()
     local ok,err=pcall(poll)
+    local finished=os.clock()
+    if finished-started>=CFG.SlowPollWarnSeconds and
+       finished-lastSlowPoll>=5 then
+        lastSlowPoll=finished
+        log(string.format("PERF slow Expedition poll CPU=%.1fms",
+            (finished-started)*1000))
+    end
     if not ok and not S.warned then
         S.warned=true;log("poll error: "..tostring(err))
     end
@@ -1532,4 +2044,4 @@ hook("/Script/Engine.PlayerController:ClientRestart",
          S.coinLedger={}
          S.dropQueue={};S.destructionSeen={}
      end)
-log("v0.3.0-alpha loaded: live hook diagnostics and verified-reflection fixes")
+log("v0.7.0 STORY+EXPEDITION active: direct reward, respawn, partial death-coin dedup")

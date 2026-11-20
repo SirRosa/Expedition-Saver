@@ -41,7 +41,7 @@ local function fixture()
     local gs=actor({_name="HeldenGameState /Game/GS",GameModeType=1,bExpeditionFailed=false,
         CurrentDungeonRun=run})
     function gs:OnRep_DungeonRunState() self.repCount=(self.repCount or 0)+1 end
-    local stats=actor({CurrentHealth=0,TotalStats={MaxHealth=120}})
+    local stats=actor({CurrentHealth=120,TotalStats={MaxHealth=120}})
     local corpse=actor({_name="HeldenCharacter /Game/Old",EquipedItems={},CharacterStats=stats,
         Money={Gold=80,Artifacts=4,Scraps=17},ItemSlots={}})
     local newPawn=actor({_name="HeldenPlayerCharacter /Game/New",CharacterStats=
@@ -162,7 +162,7 @@ local function fixture()
         return coin
     end
     local listing={HeldenPlayerController={pc},HeldenEquipableItem={item},
-        BP_ExpeditionFailed_Actor_C={barrier}}
+        BP_ExpeditionFailed_Actor_C={barrier},HeldenPhysicsCoin={}}
     local clockcb
     local fakeio={open=function(fname,mode)
         if mode=="r" then
@@ -206,9 +206,26 @@ local function fixture()
         killed=function()
             local h=hooks["/Script/Helden.HeldenCharacter:Die_Auth"]
             assert(h and h.pre)
+            corpse.CharacterStats.CurrentHealth=0
+            corpse.CharacterState=1
             h.pre(corpse)
         end,
-        destroyLoot=function()
+        destroyLoot=function(direct)
+            -- Legacy physics payout tests need a truly ambiguous co-op state.
+            -- Default exposes two eligible player controllers without a native
+            -- instigator; an explicit direct=true tests solo wallet credit.
+            if not direct then
+                local second=actor({_name="HeldenPlayerController /Game/Second"})
+                local otherPawn=actor({_name="HeldenPlayerCharacter /Game/SecondPawn",
+                    Money={Gold=0,Artifacts=0,Scraps=0},
+                    CharacterStats=actor({CurrentHealth=100,
+                        TotalStats={MaxHealth=100}})})
+                function second:GetPawn() return otherPawn end
+                function otherPawn:K2_GetActorLocation()
+                    return {X=1010,Y=2000,Z=300}
+                end
+                listing.HeldenPlayerController[2]=second
+            end
             local h=hooks["/Script/Helden.HeldenPhysicsActor:OnHealthModifed"]
             local d=hooks["/Script/Helden.HeldenPhysicsActor:PlayDestructionEffect_Mulitcast"]
             assert(h and d,"destruction hooks not registered")
@@ -352,7 +369,9 @@ test("hammer destruction below health zero is required for health trigger",funct
     assert(#t.spawned==0)
     t.loot.StatsComponent.CurrentHealth=0
     h.pre(t.loot);t.tick(1)
-    assert(#t.spawned==2)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
+        "lethal callback must pay the solo player directly")
 end)
 test("elevator machine is unlocked after expedition wipe at home station",function()
     local t=fixture();t.tick()
@@ -676,6 +695,320 @@ test("failed native pickup never destroys the only surviving item",function()
         if line:find("floor_or_missing=1",1,true) then warned=true end
     end
     assert(warned,"must not falsely report fully restored inventory")
+end)
+
+-- Death currency cleanup scenarios use real currency actors (not item actors).
+local function makeCoin(t,id,money,x,age,world)
+    local c=actor({_name="HeldenPhysicsCoin /Game/"..id,Money=money})
+    function c:K2_GetActorLocation()
+        return {X=x or 1010,Y=2000,Z=300}
+    end
+    function c:GetGameTimeSinceCreation() return age or 0.5 end
+    function c:GetWorld() return world or t.world end
+    function c:K2_DestroyActor() self._valid=false;self.destroyed=true end
+    t.listing.HeldenPhysicsCoin[#t.listing.HeldenPhysicsCoin+1]=c
+    return c
+end
+
+test("exact native death drop of all three currencies is consumed once",function()
+    local t=fixture()
+    t.tick(0);t.killed()
+    local gold=makeCoin(t,"death_gold",{Gold=80,Artifacts=0,Scraps=0})
+    local artifacts=makeCoin(t,"death_artifact",{Gold=0,Artifacts=4,Scraps=0},1020)
+    local scrap=makeCoin(t,"death_scrap",{Gold=0,Artifacts=0,Scraps=17},1030)
+    for _=1,8 do t.tick(0) end
+    assert(t.newPawn.Money.Gold==80 and t.newPawn.Money.Artifacts==4 and
+           t.newPawn.Money.Scraps==17,"wallet must survive")
+    assert(gold.destroyed and artifacts.destroyed and scrap.destroyed,
+           "all strictly matched death currency must be removed")
+    assert(gold.Money.Gold==0 and artifacts.Money.Artifacts==0 and
+           scrap.Money.Scraps==0,"currency must be zeroed before removal")
+    assert(t.item:IsValid(),"physical equipment must never be destroyed")
+    for _=1,10 do t.tick(0) end
+    assert(t.newPawn.Money.Gold==80 and t.newPawn.Money.Artifacts==4,
+           "repeated ticks must not add currency")
+end)
+
+test("pre-existing money on floor remains untouched even if value matches",function()
+    local t=fixture()
+    local existing=makeCoin(t,"old_coin",
+        {Gold=80,Artifacts=4,Scraps=17})
+    t.corpse.CharacterState=0
+    t.corpse.CharacterStats.CurrentHealth=120
+    for _=1,4 do t.tick(0) end
+    t.corpse.CharacterState=1
+    t.corpse.CharacterStats.CurrentHealth=0
+    for _=1,9 do t.tick(0) end
+    assert(existing:IsValid() and not existing.destroyed,
+           "pre-existing physical currency is not a native death drop")
+    assert(existing.Money.Gold==80)
+    assert(t.newPawn.Money.Gold==80)
+end)
+
+test("partial native death drop is removed without needing exact full wallet sum",function()
+    local t=fixture()
+    t.tick(0);t.killed()
+    local near=makeCoin(t,"partial_death_currency",
+        {Gold=40,Artifacts=4,Scraps=0})
+    for _=1,9 do t.tick(0) end
+    assert(near.destroyed and near.Money.Gold==0,
+        "native partial coin must be removed only after wallet is restored")
+    assert(t.newPawn.Money.Gold==80 and t.newPawn.Money.Artifacts==4)
+    assert(t.item:IsValid(),"death money cleanup never destroys equipment")
+end)
+
+test("new coins exceeding wallet budget are not deleted",function()
+    local t=fixture()
+    t.tick(0);t.killed()
+    local unrelated=makeCoin(t,"too_large_coin",
+        {Gold=500,Artifacts=0,Scraps=0})
+    for _=1,9 do t.tick(0) end
+    assert(unrelated:IsValid() and unrelated.Money.Gold==500)
+    assert(t.newPawn.Money.Gold==80)
+end)
+
+test("stale death-area coins cannot be removed",function()
+    local t=fixture()
+    t.tick(0);t.killed()
+    local stale=makeCoin(t,"stale_gold",
+        {Gold=80,Artifacts=4,Scraps=17},1010,35)
+    for _=1,9 do t.tick(0) end
+    assert(stale:IsValid() and stale.Money.Gold==80)
+end)
+
+test("distant fresh coins cannot be mistaken for native death drop",function()
+    local t=fixture()
+    t.tick(0);t.killed()
+    local other=makeCoin(t,"remote_gold",
+        {Gold=80,Artifacts=4,Scraps=17},2000)
+    for _=1,9 do t.tick(0) end
+    assert(other:IsValid() and other.Money.Gold==80)
+end)
+
+test("currency must not be destroyed if respawned pawn has no valid wallet",function()
+    local t=fixture()
+    t.newPawn.Money=nil
+    t.tick(0);t.killed()
+    local gold=makeCoin(t,"not_funded",
+        {Gold=80,Artifacts=4,Scraps=17})
+    for _=1,9 do t.tick(0) end
+    assert(gold:IsValid() and not gold.destroyed)
+    assert(gold.Money.Gold==80)
+    assert(t.item:IsValid())
+end)
+
+test("fresh same-value currency from a different world must not be removed",function()
+    local t=fixture()
+    function t.corpse:GetWorld() return t.world end
+    t.tick(0);t.killed()
+    local otherWorld=actor({_name="World /Game/Other"})
+    local elsewhere=makeCoin(t,"other_world",
+        {Gold=80,Artifacts=4,Scraps=17},1010,0.5,otherWorld)
+    for _=1,9 do t.tick(0) end
+    assert(elsewhere:IsValid() and not elsewhere.destroyed)
+    assert(t.newPawn.Money.Gold==80)
+end)
+
+test("solo furniture reward credits wallet directly without coin actors",function()
+    local t=fixture()
+    t.tick(0)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==0,"direct payout must not spawn physical coin actors")
+    assert(t.corpse.Money.Gold==100)
+    assert(t.corpse.Money.Artifacts==10)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(t.corpse.Money.Gold==100,"two hooks must not credit twice")
+end)
+
+test("verified active damage overlap targets correct co-op player",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/P2"})
+    local secondPawn=actor({_name="HeldenPlayerCharacter /Game/P2Pawn",
+        Money={Gold=5,Artifacts=1,Scraps=9}})
+    function second:GetPawn() return secondPawn end
+    t.listing.HeldenPlayerController[2]=second
+    local attackBox=actor({bDamageActive=true})
+    function attackBox:GetOwner() return secondPawn end
+    t.tick(0)
+    local h=t.hooks["/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin"]
+    assert(h and h.pre,"active damage event hook is required")
+    h.pre(attackBox,nil,t.loot)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==80)
+    assert(secondPawn.Money.Gold==25 and secondPawn.Money.Artifacts==7)
+    assert(secondPawn.Money.Scraps==9,"destroy reward must not touch scrap")
+end)
+
+test("victim actor instigator cannot steal payout from uniquely close player",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/P2"})
+    local secondPawn=actor({_name="HeldenPlayerCharacter /Game/P2Pawn",
+        Money={Gold=5,Artifacts=1,Scraps=9}})
+    function second:GetPawn() return secondPawn end
+    function secondPawn:K2_GetActorLocation()
+        return {X=2500,Y=2000,Z=300}
+    end
+    t.listing.HeldenPlayerController[2]=second
+    function t.loot:GetInstigatorController() return second end
+    t.tick(0)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==0,"unique nearby melee player should get direct credit")
+    assert(t.corpse.Money.Gold==100,
+        "victim GetInstigator must not override actual nearby player")
+    assert(secondPawn.Money.Gold==5)
+end)
+
+test("ambiguous multiplayer leaves physical coin fallback instead of wrong wallet",function()
+    local t=fixture()
+    t.tick(0)
+    t.destroyLoot()
+    t.tick(0)
+    assert(#t.spawned==2)
+    assert(t.corpse.Money.Gold==80 and t.corpse.Money.Artifacts==4)
+end)
+
+test("dead co-op partner is not treated as true single-player",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/DeadPartner"})
+    local deadSoul=actor({_name="HeldenCharacterSoul /Game/Soul"})
+    function second:GetPawn() return deadSoul end
+    t.listing.HeldenPlayerController[2]=second
+    t.tick(0)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==2,"unknown killer in co-op must fall back to world currency")
+    assert(t.corpse.Money.Gold==80)
+end)
+
+test("two active damage sources make payout unassignable",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/P2"})
+    local secondPawn=actor({_name="HeldenPlayerCharacter /Game/P2Pawn",
+        Money={Gold=5,Artifacts=1,Scraps=9}})
+    function second:GetPawn() return secondPawn end
+    t.listing.HeldenPlayerController[2]=second
+    local hit=t.hooks["/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin"]
+    local box1=actor({bDamageActive=true})
+    local box2=actor({bDamageActive=true})
+    function box1:GetOwner() return t.corpse end
+    function box2:GetOwner() return secondPawn end
+    t.tick(0)
+    hit.pre(box1,nil,t.loot)
+    hit.pre(box2,nil,t.loot)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==2)
+    assert(t.corpse.Money.Gold==80 and secondPawn.Money.Gold==5)
+end)
+
+test("Story mode native death respawns and recovers wallet plus inventory",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.registry.HeldenDungeonElevator=nil
+    t.registry.HeldenElevator=nil
+    t.tick(0)
+    t.killed()
+    for _=1,8 do t.tick(0) end
+    assert(t.counts.respawn==1,
+        "native respawn must work in Story Default=0")
+    assert(t.newPawn.location and t.newPawn.location.X==1000,
+        "Story should preserve a valid native spawn location")
+    assert(t.newPawn.Money.Gold==80 and t.newPawn.Money.Artifacts==4
+        and t.newPawn.Money.Scraps==17,"wallet survives Story death")
+    assert(t.newPawn.ItemSlots[1].CurrentItemInSlot==t.item,
+        "Story must recover held items")
+    assert(t.save.DungeonLevel==2,
+        "Story respawn never mutates Expedition depth")
+end)
+
+test("Story furniture rewards are paid directly even without dungeon owner",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.loot.OwningDungeon=nil
+    t.loot.GetInspectData=function()
+        return {bIsInDungeon=false,
+            Value={Gold=20,Artifacts=6,Scraps=5}}
+    end
+    t.tick(0)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
+        "Story Gold and tokens go straight into wallet")
+    assert(#t.spawned==0,
+        "no physics coins when Story receiver is known")
+end)
+
+test("Story death with currency drops removes coins, not equipment",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.tick(0)
+    t.killed()
+    local dropped=makeCoin(t,"story_death_drop",
+        {Gold=80,Artifacts=4,Scraps=0})
+    for _=1,10 do t.tick(0) end
+    assert(t.newPawn.Money.Gold==80)
+    assert(dropped.destroyed,"Story duplicated money drops must be removed")
+    assert(t.item:IsValid(),"never destroy dropped gear")
+end)
+
+test("Story failure does not modify Expedition-only failure flags",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.tick(0)
+    t.md.bHasFailed=true
+    t.gs.bExpeditionFailed=true
+    t.run.State=3;t.run.Flags=1
+    t.tick(0)
+    assert(t.md.bHasFailed and t.gs.bExpeditionFailed,
+        "Expedition save repairs must remain disabled in Story")
+end)
+
+test("recent weapon attack identifies co-op killer even when both players stand close",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/OtherPlayer"})
+    local pawn=actor({_name="HeldenPlayerCharacter /Game/OtherPawn",
+        Money={Gold=10,Artifacts=1,Scraps=2}})
+    function second:GetPawn() return pawn end
+    function pawn:K2_GetActorLocation() return {X=1010,Y=2000,Z=300} end
+    t.listing.HeldenPlayerController[2]=second
+    local weapon=actor({_name="HeldenWeapon /Game/OtherHammer",
+        PreviousOwner=pawn})
+    t.tick(0)
+    local attack=t.hooks["/Script/Helden.HeldenWeapon:Attack_Server"]
+    assert(attack and attack.pre,"real server weapon action must be hooked")
+    attack.pre(weapon)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==0,
+        "actual attacker receives direct payout even with both nearby")
+    assert(t.corpse.Money.Gold==80,
+        "non-attacking nearby player must never receive gold")
+    assert(pawn.Money.Gold==30 and pawn.Money.Artifacts==7)
+end)
+
+test("simultaneous weapon attacks from co-op players stay ambiguous",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/OtherPlayer"})
+    local pawn=actor({_name="HeldenPlayerCharacter /Game/OtherPawn",
+        Money={Gold=10,Artifacts=1,Scraps=2}})
+    function second:GetPawn() return pawn end
+    function pawn:K2_GetActorLocation() return {X=1010,Y=2000,Z=300} end
+    t.listing.HeldenPlayerController[2]=second
+    local weapon1=actor({_name="HeldenWeapon /Game/Hammer1",
+        PreviousOwner=t.corpse})
+    local weapon2=actor({_name="HeldenWeapon /Game/Hammer2",
+        PreviousOwner=pawn})
+    t.tick(0)
+    local attack=t.hooks["/Script/Helden.HeldenWeapon:Attack_Server"]
+    attack.pre(weapon1);attack.pre(weapon2)
+    t.destroyLoot(true);t.tick(0)
+    assert(#t.spawned==2,"ambiguous attack owners must use physical fallback")
+    assert(t.corpse.Money.Gold==80 and pawn.Money.Gold==10)
 end)
 
 print("ALL TESTS PASSED ("..passed..")")
