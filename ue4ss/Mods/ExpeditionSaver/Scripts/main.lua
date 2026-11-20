@@ -208,7 +208,7 @@ local S={
     deathEvents=0,newPawnEvents=0,rewardEvents=0,rawDeathEvents=0,rawDestroyEvents=0,heartbeatTicks=1000,machineRepairCycle=1000,
     players={},recoveries={},observedDeaths=0,failedBarriers=0,coinsLocated=0,
     unresolvedTreasureLogs=0,
-    damageHits={},pollCycle=0,
+    damageHits={},pollCycle=0,gearScanTick=-1,gearScanObjects={},
     coinBaseline={},coinBaselineCycle=0,currencyCleanup={},
     failureChecks=0
 }
@@ -272,6 +272,7 @@ local function resetForSave(ctx,key,slot)
     S.currencyCleanup=preserve and oldCurrencyCleanup or {}
     S.coinBaseline={};S.coinBaselineCycle=0
     S.damageHits={};S.pollCycle=0
+    S.gearScanTick=-1;S.gearScanObjects={}
     S.nextBackupDepth=-1
     S.dropQueue={};S.destructionSeen={}
     S.nextMachineRepair=0;S.machineRepairAttempts=0
@@ -514,7 +515,7 @@ local function processCurrencyCleanup()
     end
 end
 
-local function gearOf(char)
+local function gearOf(char,forceFresh)
     if not valid(char) then return {} end
     local result,seen={},{}
     local function add(item,source,slotIndex)
@@ -543,7 +544,13 @@ local function gearOf(char)
         if valid(slot) then add(get(slot,"CurrentItemInSlot"),"ItemSlots",i-1) end
     end)
     local owner=path(char)
-    for _,item in ipairs(all("HeldenEquipableItem")) do
+    -- At most one UObject-wide equipment scan per game-thread poll,
+    -- shared by all co-op players. An actual death requests a fresh list.
+    if forceFresh or S.gearScanTick~=S.pollCycle then
+        S.gearScanTick=S.pollCycle
+        S.gearScanObjects=all("HeldenEquipableItem")
+    end
+    for _,item in ipairs(S.gearScanObjects) do
         if valid(item) and path(get(item,"PreviousOwner"))==owner and
            valid(get(item,"CurrentSlot")) then
             add(item,"PreviousOwner")
@@ -574,7 +581,7 @@ local function queuePlayerDeath(pc,char,snapshot,reason)
         if path(candidate)==key then player=true;break end
     end
     if not player then return false end
-    local inv=snapshot or gearOf(char)
+    local inv=snapshot or gearOf(char,true)
     local tracked=S.players[key]
     local cash=(tracked and tracked.money) or snapshotMoney(char)
     local deathPos=(tracked and tracked.lastLocation) or location(char)
