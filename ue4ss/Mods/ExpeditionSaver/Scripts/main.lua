@@ -358,8 +358,10 @@ local function collectAtElevator(entry,dest,pawn)
     if not CFG.EnableItemRecovery then return end
     local moved,alreadyOwned,created,lost=0,0,0,0
     local counts={}
+    local nativeRefs={}
     local function countNative(item)
         if not valid(item) then return end
+        nativeRefs[path(item)]=true
         local klass
         pcall(function() klass=item:GetClass() end)
         local key=valid(klass) and path(klass)
@@ -380,8 +382,9 @@ local function collectAtElevator(entry,dest,pawn)
         local item=r.ref
         local key=r.classPath
         local count=key and (counts[key] or 0) or 0
-        if count>0 then
-            counts[key]=count-1
+        if (valid(item) and nativeRefs[path(item)]) or count>0 or
+            (valid(item) and get(item,"PreviousOwner")==pawn) then
+            if count>0 then counts[key]=count-1 end
             -- Native game already restored an item of this class.
             alreadyOwned=alreadyOwned+1
         else
