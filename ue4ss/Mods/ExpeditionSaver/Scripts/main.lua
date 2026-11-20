@@ -27,6 +27,7 @@ local CFG = {
     CoinCriticalEveryPolls = 4, -- keep frequent baseline checks near death
     GearFullScanPolls = 30, -- world-wide inventory scan only every 9s
     PlayerControllerScanPolls = 100, -- cache live controllers for up to 30s; invalidate on new pawn
+    RewardRetryMaxTicks = 120, -- backoff up to 36 seconds, no every-300ms retry storm
     UseCoinObjectTracking = true, -- UE4SS NotifyOnNewObject avoids periodic coin registry scans
     RecentCoinMaxReferences = 512,
     StoryValueGoldFromScraps = 3, -- deliberate modded reward, not a native destruction drop
@@ -1546,6 +1547,13 @@ local function creditReward(pawn,currency,amount)
     -- UE4SS can return an attached proxy or a copied UScriptStruct.
     put(money,currency,goal)
     local after=number(get(get(pawn,"Money"),currency),0,100000000)
+    if after~=goal then
+        -- UE4SS can expose a detached UScriptStruct. Reassigning its
+        -- original UObject-backed struct is more reliable than a Lua
+        -- table on older UE4SS builds.
+        put(pawn,"Money",money)
+        after=number(get(get(pawn,"Money"),currency),0,100000000)
+    end
     if after~=goal and after==old then
         local fresh=get(pawn,"Money")
         local newMoney={}
@@ -1561,8 +1569,7 @@ local function creditReward(pawn,currency,amount)
         pcall(function() pawn:ForceNetUpdate() end)
         return true
     end
-    log("DIRECT REWARD not verified "..currency..
-        " expected="..goal.." actual="..tostring(after))
+    -- The queue logs failures with exponential backoff, not per frame.
     return false
 end
 
@@ -1654,41 +1661,55 @@ local function processDropQueue()
     if #S.dropQueue==0 or not onHost() then return end
     for i=#S.dropQueue,1,-1 do
         local job=S.dropQueue[i]
-        job.attempts=(job.attempts or 0)+1
-        if not valid(job.recipient) or get(job.recipient,"Money")==nil then
-            job.recipient,job.recipientSource=nearestPlayerAt(job.at)
-        end
-        local receiver=job.recipient
-        if valid(receiver) then
-            if job.gold>0 and not job.goldDone then
-                job.goldDone=creditReward(receiver,"Gold",job.gold)
-                if job.goldDone then
-                    log("DIRECT REWARD Gold="..job.gold..
-                        " to="..tostring(path(receiver))..
-                        " via="..tostring(job.recipientSource))
+        -- A detached Money struct can fail writes on some UE4SS versions.
+        -- Never retry every 300ms for every smashed chair: that produced
+        -- an ever-growing queue of costly UObject writes and stutters.
+        if S.pollCycle>=(job.nextRewardCycle or 0) then
+            job.attempts=(job.attempts or 0)+1
+            if not valid(job.recipient) or
+               get(job.recipient,"Money")==nil then
+                job.recipient,job.recipientSource=nearestPlayerAt(job.at)
+            end
+            local receiver=job.recipient
+            if valid(receiver) then
+                if job.gold>0 and not job.goldDone then
+                    job.goldDone=creditReward(receiver,"Gold",job.gold)
+                    if job.goldDone then
+                        log("DIRECT REWARD Gold="..job.gold..
+                            " to="..tostring(path(receiver))..
+                            " via="..tostring(job.recipientSource))
+                    end
+                end
+                if job.artifacts>0 and not job.artifactDone then
+                    job.artifactDone=creditReward(receiver,"Artifacts",job.artifacts)
+                    if job.artifactDone then
+                        log("DIRECT REWARD Artifacts="..job.artifacts..
+                            " to="..tostring(path(receiver))..
+                            " via="..tostring(job.recipientSource))
+                    end
                 end
             end
-            if job.artifacts>0 and not job.artifactDone then
-                job.artifactDone=creditReward(receiver,"Artifacts",job.artifacts)
-                if job.artifactDone then
-                    log("DIRECT REWARD Artifacts="..job.artifacts..
-                        " to="..tostring(path(receiver))..
-                        " via="..tostring(job.recipientSource))
+            if (job.gold<=0 or job.goldDone) and
+               (job.artifacts<=0 or job.artifactDone) then
+                table.remove(S.dropQueue,i)
+            else
+                -- 0.6s, 1.2s, 2.4s, 4.8s, 9.6s, ... capped at 36s.
+                local step=math.min(CFG.RewardRetryMaxTicks,
+                    2^math.min(job.attempts,7))
+                job.nextRewardCycle=S.pollCycle+step
+                -- Diagnostic on first attempt and at powers of two only,
+                -- not once per currency and not every engine poll.
+                local n=job.attempts
+                if n==1 or n==2 or n==4 or n==8 or n==16 then
+                    log("DIRECT REWARD PENDING actor="..tostring(job.key)..
+                        " GoldPending="..tostring(not job.goldDone)..
+                        " ArtifactsPending="..tostring(not job.artifactDone)..
+                        " recipient="..tostring(path(receiver))..
+                        " reason="..tostring(job.recipientSource)..
+                        " attempt="..n.." nextPolls="..step..
+                        " (NO PHYSICAL DROP)")
                 end
             end
-        end
-        if (job.gold<=0 or job.goldDone) and
-           (job.artifacts<=0 or job.artifactDone) then
-            table.remove(S.dropQueue,i)
-        elseif job.attempts%20==0 then
-            -- Keep pending rewards in memory until a real wallet can be
-            -- credited; never replace them with physical currency.
-            log("DIRECT REWARD PENDING actor="..tostring(job.key)..
-                " GoldPending="..tostring(not job.goldDone)..
-                " ArtifactsPending="..tostring(not job.artifactDone)..
-                " recipient="..tostring(path(receiver))..
-                " reason="..tostring(job.recipientSource)..
-                " attempts="..job.attempts.." (NO PHYSICAL DROP)")
         end
     end
 end
@@ -2173,4 +2194,4 @@ hook("/Script/Engine.PlayerController:ClientRestart",
          S.coinLedger={}
          S.dropQueue={};S.destructionSeen={}
      end)
-log("v0.7.2 STORY+EXPEDITION active: reduced scans + Story trash reward fallback")
+log("v0.7.3 STORY+EXPEDITION: valued items, coin events, wallet backoff, XP x2 QOL")
