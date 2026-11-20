@@ -1,6 +1,6 @@
 -- Expedition Mapper: read-only UE4SS diagnostics for current Grain Rot build.
 -- This is NOT the gameplay mod; it only dumps the game's reflection metadata.
--- Launch an Expedition save, then press F8 for Mappings.usmap and F9 for
+-- Launch an Expedition save, then press F8 for an auto-named Helden-*.usmap and F9 for
 -- UE4SS_ObjectDump.txt. Each action is explicitly user-triggered.
 local prefix = "[ExpeditionMapper] "
 local function info(msg)
@@ -35,8 +35,8 @@ local function bind(key, label, action)
     return true
 end
 
-bind("F8","F8 -> dump CURRENT Mappings.usmap (with Blueprint-generated types)", function()
-    perform("Mappings.usmap", "DumpUSMAP")
+bind("F8","F8 -> dump CURRENT Helden-*.usmap (automatic filename)", function()
+    perform("USMAP (automatically named Helden-*.usmap)", "DumpUSMAP")
 end)
 bind("F9","F9 -> dump UE4SS_ObjectDump.txt (loaded objects/functions)", function()
     perform("UE4SS_ObjectDump.txt", "DumpAllObjects")
