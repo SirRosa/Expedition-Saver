@@ -391,9 +391,8 @@ local function gearOf(char)
     -- The game stores inventory items in BOTH EquipedItems and ItemSlots.
     -- Previously the latter was missing, explaining 1 retained item in log.
     each(get(char,"EquipedItems"),function(item,i) add(item,"EquipedItems",i-1) end)
-    each(get(char,"ItemSlots"),function(slot,i)
-        if valid(slot) then add(get(slot,"CurrentItemInSlot"),"ItemSlots",i-1) end
-    end)
+    -- Do not read ItemSlots[].CurrentItemInSlot: this property is absent
+    -- from the real USMAP HeldenInventroySlot struct.
     local owner=path(char)
     for _,item in ipairs(all("HeldenEquipableItem")) do
         if valid(item) and path(get(item,"PreviousOwner"))==owner and
@@ -411,6 +410,11 @@ local function currentPawn(pc)
     local ok,pawn=pcall(function() return pc:GetPawn() end)
     if ok and valid(pawn) then return pawn end
 end
+-- Note: HeldenCharacter.ItemSlots contains HeldenInventroySlot structs
+-- (SlotName, SlotComponent) only. There is no CurrentItemInSlot in this
+-- struct. Do not inspect these entries as UObjects or report them as gear.
+-- The real inventory references live in EquipedItems and equipable actors
+-- whose PreviousOwner/CurrentSlot are native components.
 -- In real Expedition runs the native Die_Auth and Blueprint
 -- OnPlayerKilled hook were NEVER called (observed v0.3 log).
 -- Monitor actual controller/pawn state and preserve inventory BEFORE death.
@@ -584,6 +588,11 @@ local function isOriginalItemAlreadyPresent(pawn,rec)
         end)
         if found then return true end
     end
+    if rec.slotIdx~=nil and rec.slotIdx>=4 then
+        -- Extra quickslots must use stable DynamicSaveName, not a same-class
+        -- fallback: two identical guns in slots 5 and 6 are different items.
+        return false
+    end
     if rec.slotIdx~=nil and rec.classPath then
         -- If the native engine rebuilt the same slot with the same class,
         -- prefer that actor rather than creating a second instance.
@@ -598,12 +607,83 @@ local function isOriginalItemAlreadyPresent(pawn,rec)
     end
     return false
 end
+-- Quickslots/Junk Slots v0.2.5 compatibility: after a new pawn is
+-- spawned, the game's equip logic may put a recovered weapon into a vanilla
+-- slot. Preserve the original (5-10) slot association once native components
+-- exist. Fail closed if another item occupies the desired slot.
+local function restoreExtraSlot(pawn,rec)
+    local idx=rec.slotIdx
+    if idx==nil or idx<4 then return true,"vanilla" end
+    if idx>9 then return false,"unsupported_slot_index" end
+    local slots=get(pawn,"ItemSlots")
+    local size=0
+    pcall(function() size=#slots end)
+    if size<idx+1 then return false,"extra_slots_not_ready" end
+    local item=rec.ref
+    if not ownsItem(pawn,item) then
+        item=nil
+        local function match(candidate)
+            if not valid(candidate) or item then return end
+            local dynamic=asName(get(candidate,"DynamicSaveName"))
+            if rec.dynamicSaveName and dynamic==rec.dynamicSaveName and
+                ownsItem(pawn,candidate) then item=candidate end
+        end
+        each(get(pawn,"EquipedItems"),match)
+        if not item then return false,"owned_actor_not_identified" end
+    end
+    local current=number(get(item,"CurrentInventorySlot"),0,128)
+    if current==idx then return true,"already_target_slot" end
+    local occupied=false
+    each(get(pawn,"EquipedItems"),function(other)
+        if valid(other) and path(other)~=path(item) and
+            number(get(other,"CurrentInventorySlot"),0,128)==idx then
+            occupied=true
+        end
+    end)
+    if occupied then return false,"saved_slot_occupied" end
+    local slot
+    pcall(function() slot=slots[idx+1] end)
+    local component=get(slot,"SlotComponent")
+    if not valid(component) then return false,"extra_component_missing" end
+    local wrote=put(item,"CurrentSlot",component)
+    wrote=put(item,"CurrentInventorySlot",idx) and wrote
+    if not wrote or number(get(item,"CurrentInventorySlot"),0,128)~=idx or
+        path(get(item,"CurrentSlot"))~=path(component) then
+        return false,"native_rebind_readback_failed"
+    end
+    pcall(function() item:OnRep_CurrentSlot() end)
+    pcall(function() item:OnRep_CurrentInventorySlot() end)
+    log("INVENTORY EXTRA SLOT restored "..(idx+1).." dynamic="..
+        tostring(rec.dynamicSaveName))
+    return true,"restored_extra_slot"
+end
+
 local function processInventoryRecoveries()
     if not CFG.EnableItemRecovery or not onHost() then return end
     for key,job in pairs(S.recoveries) do
         job.tick=job.tick+1
         local pawn=job.pawn
-        if not valid(pawn) then
+        -- The Quickslots mod extends CDOs before spawn. When loaded
+        -- after ExpeditionSaver, wait for its bounded native initialization
+        -- rather than letting Interact put the saved 5-0 item in slot 1-4.
+        local expectedExtra=false
+        for _,rec in ipairs(job.entry.gear) do
+            if rec.slotIdx and rec.slotIdx>=4 and rec.slotIdx<=9 then
+                expectedExtra=true;break
+            end
+        end
+        local inventorySlots=get(pawn,"ItemSlots")
+        local count=0
+        pcall(function() count=#inventorySlots end)
+        if valid(pawn) and expectedExtra and count<10 and
+            (job.waitExtra or 0)<40 then
+            job.waitExtra=(job.waitExtra or 0)+1
+            job.tick=job.tick-1 -- do not consume recovery deadline
+            if job.waitExtra==1 or job.waitExtra==40 then
+                log("INVENTORY EXTRA WAIT pawn slots="..count..
+                    " expected=10 tick="..job.waitExtra)
+            end
+        elseif not valid(pawn) then
             log("INVENTORY RECOVERY aborted: pawn invalid")
             S.recoveries[key]=nil
         else
@@ -615,7 +695,14 @@ local function processInventoryRecoveries()
             for _,rec in ipairs(job.entry.gear) do
                 if ownsItem(pawn,rec.ref) or
                    isOriginalItemAlreadyPresent(pawn,rec) then
-                    job.done[rec.key]=true
+                    local aligned,why=restoreExtraSlot(pawn,rec)
+                    if aligned then job.done[rec.key]=true
+                    elseif rec.slotIdx and rec.slotIdx>=4 and
+                        not job.warnings[rec.key] then
+                        job.warnings[rec.key]=true
+                        log("INVENTORY EXTRA pending "..rec.key..
+                            " reason="..tostring(why))
+                    end
                 end
             end
             local unowned=0
@@ -690,7 +777,8 @@ local function processInventoryRecoveries()
                             (pick and "" or " err="..tostring(err)))
                     end
                     if valid(item) and ownsItem(pawn,item) then
-                        job.done[rec.key]=true
+                        local aligned=restoreExtraSlot(pawn,rec)
+                        if aligned then job.done[rec.key]=true end
                     end
                 end
             end
