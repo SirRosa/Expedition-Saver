@@ -22,7 +22,12 @@ local CFG = {
     DirectFurnitureRewards = true, -- wallet credit to verified or uniquely close destroyer
     RewardNearbyPlayerRadius = 280, -- 2.8 m, solo melee reach only
     SlowPollWarnSeconds = 0.035,
-    CoinBaselineEveryPolls = 4, -- preserve strict pre-death baseline for anti-duplication
+    CoinBaselineEveryPolls = 30, -- 9s in healthy gameplay; avoid 1.2s full registry hitches
+    CoinCriticalHealthFraction = 0.35,
+    CoinCriticalEveryPolls = 4, -- keep frequent baseline checks near death
+    GearFullScanPolls = 30, -- world-wide inventory scan only every 9s
+    PlayerControllerScanPolls = 10, -- cached small controller list for 3s
+    DeathCoinScanEveryPolls = 8, -- 2.4s between full scans while recovering
     RespawnDelaySeconds = 0.15,
     RespawnRetrySeconds = 1.5,
     MaxRespawnRequests = 3,
@@ -226,6 +231,7 @@ local S={
     unresolvedTreasureLogs=0,
     damageHits={},attackIntents={},pollCycle=0,
     gearScanTick=-1,gearScanObjects={},
+    cachedControllers=nil,controllerScanTick=-1,
     coinBaseline={},coinBaselineCycle=0,coinBaselineReady=false,
     currencyCleanup={},claimedDeathCoins={},
     failureChecks=0,
@@ -299,6 +305,7 @@ local function resetForSave(ctx,key,slot)
     S.claimedDeathCoins={}
     S.damageHits={};S.attackIntents={};S.pollCycle=0
     S.gearScanTick=-1;S.gearScanObjects={}
+    S.cachedControllers=nil;S.controllerScanTick=-1
     S.nextBackupDepth=-1
     S.dropQueue={};S.destructionSeen={}
     S.nextMachineRepair=0;S.machineRepairAttempts=0
@@ -447,7 +454,10 @@ local function processCurrencyCleanup()
                     funded=false
                 end
             end
-            if funded then
+            -- One initial lookup, then 2.4s between world-wide searches;
+            -- previously up to 100 FindAllOf calls in 30s after a death.
+            if funded and (job.ticks==1 or
+               job.ticks%CFG.DeathCoinScanEveryPolls==0) then
                 local newCoins=0
                 for _,coin in ipairs(all("HeldenPhysicsCoin")) do
                     if valid(coin) then
@@ -611,7 +621,8 @@ local function gearOf(char,forceFresh)
     local owner=path(char)
     -- At most one UObject-wide equipment scan per game-thread poll,
     -- shared by all co-op players. An actual death requests a fresh list.
-    if forceFresh or S.gearScanTick~=S.pollCycle then
+    if forceFresh or S.gearScanTick<0 or
+       S.pollCycle-S.gearScanTick>=CFG.GearFullScanPolls then
         S.gearScanTick=S.pollCycle
         S.gearScanObjects=all("HeldenEquipableItem")
     end
@@ -631,6 +642,16 @@ local function currentPawn(pc)
     local ok,pawn=pcall(function() return pc:GetPawn() end)
     if ok and valid(pawn) then return pawn end
 end
+local function playerControllers(force)
+    -- FindAllOf scans the global UObject registry. Cache this small set
+    -- across 10 engine ticks instead of repeating it for each operation.
+    if force or S.cachedControllers==nil or
+       S.pollCycle-S.controllerScanTick>=CFG.PlayerControllerScanPolls then
+        S.cachedControllers=all("HeldenPlayerController")
+        S.controllerScanTick=S.pollCycle
+    end
+    return S.cachedControllers
+end
 -- In real Expedition runs the native Die_Auth and Blueprint
 -- OnPlayerKilled hook were NEVER called (observed v0.3 log).
 -- Monitor actual controller/pawn state and preserve inventory BEFORE death.
@@ -642,7 +663,7 @@ local function queuePlayerDeath(pc,char,snapshot,reason)
     local key=path(pc)
     if not key or S.pending[key] then return false end
     local player=false
-    for _,candidate in ipairs(all("HeldenPlayerController")) do
+    for _,candidate in ipairs(playerControllers()) do
         if path(candidate)==key then player=true;break end
     end
     if not player then return false end
@@ -678,8 +699,8 @@ local function captureDeath(char)
 end
 local function monitorPlayers(ctx)
     if not CFG.EnableRespawn or not deathAllowed(ctx) then return end
-    local anyAlive=false
-    for _,pc in ipairs(all("HeldenPlayerController")) do
+    local anyAlive,anyDanger=false,false
+    for _,pc in ipairs(playerControllers()) do
         if valid(pc) then
             local key=path(pc)
             local tracking=S.players[key]
@@ -721,6 +742,12 @@ local function monitorPlayers(ctx)
             tracking.lastHealth=health
             if activeCharacter then
                 anyAlive=true
+                local total=get(stats,"TotalStats")
+                local maxHealth=tonumber(get(total,"MaxHealth"))
+                if maxHealth and maxHealth>0 and
+                   health<=maxHealth*CFG.CoinCriticalHealthFraction then
+                    anyDanger=true
+                end
                 tracking.lastPawn=char
                 tracking.money=snapshotMoney(char) or tracking.money
                 tracking.lastLocation=location(char) or tracking.lastLocation
@@ -749,8 +776,9 @@ local function monitorPlayers(ctx)
     -- One registry scan at most every 4 poll cycles, regardless of player count.
     if anyAlive then
         S.coinBaselineCycle=S.coinBaselineCycle+1
-        if not S.coinBaselineReady or
-           S.coinBaselineCycle>=CFG.CoinBaselineEveryPolls then
+        local period=anyDanger and CFG.CoinCriticalEveryPolls or
+            CFG.CoinBaselineEveryPolls
+        if not S.coinBaselineReady or S.coinBaselineCycle>=period then
             S.coinBaselineCycle=0
             snapshotExistingCoins()
         end
@@ -1293,7 +1321,7 @@ local function ownerController(source)
         else pcall(function() nextObj=obj:GetOwner() end) end
         obj=nextObj
     end
-    local pcList=all("HeldenPlayerController")
+    local pcList=playerControllers()
     for _,pc in ipairs(pcList) do
         if valid(pc) then
             local pawn=currentPawn(pc)
@@ -1336,7 +1364,7 @@ end
 local function nearestPlayerAt(at)
     local best,bestDistance,bestId
     local sole,eligible,unknownPositions=nil,0,0
-    for _,pc in ipairs(all("HeldenPlayerController")) do
+    for _,pc in ipairs(playerControllers()) do
         if valid(pc) then
             local pawn=currentPawn(pc)
             if valid(pawn) and get(pawn,"Money")~=nil then
@@ -1371,7 +1399,7 @@ local function selectDestroyer(actor,origin)
     local hit=key and S.damageHits[key] or nil
     local recent=hit and S.pollCycle-hit.tick<=2
     if recent and not hit.ambiguous then
-        for _,pc in ipairs(all("HeldenPlayerController")) do
+        for _,pc in ipairs(playerControllers()) do
             if valid(pc) and path(pc)==hit.player then
                 local pawn=currentPawn(pc)
                 if valid(pawn) and get(pawn,"Money")~=nil then
@@ -1385,7 +1413,7 @@ local function selectDestroyer(actor,origin)
     local at=location(actor)
     local attacker,count=nil,0
     if at then
-        for _,pc in ipairs(all("HeldenPlayerController")) do
+        for _,pc in ipairs(playerControllers()) do
             if valid(pc) then
                 local pawn=currentPawn(pc)
                 local attack=S.attackIntents[path(pc)]
@@ -1709,7 +1737,7 @@ local function poll()
             " deaths="..S.deathEvents.." rawDeaths="..S.rawDeathEvents..
             " destructionEvents="..S.rewardEvents..
             " rawDestructions="..S.rawDestroyEvents..
-            " playerControllers="..#all("HeldenPlayerController")..
+            " playerControllers="..#playerControllers()..
             " failureDoors="..#all("BP_ExpeditionFailed_Actor_C")..
             " failureChecks="..S.failureChecks)
     end
@@ -1793,7 +1821,7 @@ end
 local function watchReplicatedDeadState(context)
     local character=unwrap(context)
     if not valid(character) or enum(get(character,"CharacterState"))~=1 then return end
-    for _,pc in ipairs(all("HeldenPlayerController")) do
+    for _,pc in ipairs(playerControllers()) do
         if valid(pc) then
             local key=path(pc)
             local record=S.players[key]
@@ -1808,6 +1836,8 @@ local function watchReplicatedDeadState(context)
     end
 end
 local function watchNewPawn(context,oldPawn,newPawn)
+    S.cachedControllers=nil
+    S.controllerScanTick=-1
     local pc=unwrap(context)
     local pawn=unwrap(newPawn)
     if not valid(pc) or not valid(pawn) then return end
