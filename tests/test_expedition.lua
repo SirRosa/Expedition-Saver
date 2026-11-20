@@ -1257,4 +1257,71 @@ test("coin construction notifications replace all recurring global baseline scan
         "healthy Story gameplay must never issue a repeating registry sweep")
 end)
 
+test("detached UE4SS Money struct is written back before wallet reward considered paid",function()
+    local t=fixture()
+    local live=t.corpse.Money
+    t.corpse.Money=nil
+    setmetatable(t.corpse,{
+        __index=function(_,key)
+            if key=="Money" then
+                return {Gold=live.Gold,Artifacts=live.Artifacts,Scraps=live.Scraps}
+            end
+        end,
+        __newindex=function(self,key,value)
+            if key=="Money" then
+                live={Gold=value.Gold,Artifacts=value.Artifacts,Scraps=value.Scraps}
+            else rawset(self,key,value) end
+        end
+    })
+    t.tick(0);t.destroyLoot(true);t.tick(0)
+    assert(live.Gold==100 and live.Artifacts==10,
+        "detached UStruct wrapper must be written back as struct, not Lua table only")
+    assert(live.Scraps==17)
+    assert(#t.spawned==0)
+end)
+
+test("unwritable wallet queue backs off instead of retrying every 300ms forever",function()
+    local t=fixture()
+    local original=t.corpse.Money
+    local writes=0
+    t.corpse.Money=nil
+    setmetatable(t.corpse,{
+        __index=function(_,key)
+            if key=="Money" then
+                return setmetatable({},{
+                    __index=function(_,currency) return original[currency] end,
+                    __newindex=function() error("read only wallet") end
+                })
+            end
+        end,
+        __newindex=function(self,key,value)
+            if key=="Money" then
+                writes=writes+1
+                error("unsupported UStruct writeback")
+            else rawset(self,key,value) end
+        end
+    })
+    t.tick(0);t.destroyLoot(true)
+    for i=1,85 do t.tick(0) end
+    assert(writes<50,
+        "missing recipient wallet write must never do thousands of retries")
+    assert(#t.spawned==0,"failed wallet payouts must never become physical drops")
+end)
+
+test("event-created death coin after first scan is removed without a full registry sweep",function()
+    local t=fixture(true)
+    t.tick(0);t.killed()
+    for i=1,4 do t.tick(0) end
+    local dropped=makeCoin(t,"late-notified-death-coin",
+        {Gold=80,Artifacts=4,Scraps=0})
+    local notice=t.coinCallbacks["/Script/Helden.HeldenPhysicsCoin"]
+    assert(notice,"test expects UE4SS coin notification")
+    notice(dropped)
+    for i=1,12 do t.tick(0) end
+    assert(dropped.destroyed,
+        "late death coin must be cleaned up from object notification")
+    assert(t.newPawn.Money.Gold==80 and t.newPawn.Money.Artifacts==4)
+    assert(t.item:IsValid(),"gear remains untouched")
+end)
+
 print("ALL TESTS PASSED ("..passed..")")
