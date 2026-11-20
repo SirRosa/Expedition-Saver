@@ -1133,6 +1133,52 @@ local function treasureDataKey(actor,ds)
     end)
     return key
 end
+local function storyFallbackValue(actor,inspectedZero)
+    -- Story furniture uses HeldenTrashConstruct.RandomMoneySpawn
+    -- (HeldenMoneyResource {Type,Amount}) as its native money source.
+    -- The dungeon-only inspect Value and scrap data rows can be zero even
+    -- though this actor is configured to drop a currency on destruction.
+    -- Respect its native chance; never invent Gold or Artifacts for items
+    -- configured to drop only Scraps.
+    if S.mode==0 then
+        local native=get(actor,"RandomMoneySpawn")
+        local kind=get(native,"Type")
+        if type(kind)~="number" then
+            local raw=tostring(kind or "")
+            kind=tonumber(raw) or
+                (raw:find("Artifacts",1,true) and 2) or
+                (raw:find("Gold",1,true) and 1) or
+                (raw:find("Scraps",1,true) and 0)
+        end
+        -- EHeldenResource: 0 Scraps, 1 Gold, 2 Artifacts
+        local amount=number(get(native,"Amount"),0,CFG.MaxCoinsPerDrop)
+        local chance=tonumber(get(actor,"MoneySpawnChance"))
+        local canLoot=get(actor,"bCanSpawnLoot")
+        if canLoot~=false and amount and amount>0 and
+            (kind==1 or kind==2) and chance and chance>0 then
+            local probability=chance>1 and chance/100 or chance
+            probability=math.min(1,probability)
+            if probability>=1 or math.random()<probability then
+                return {gold=kind==1 and amount or 0,
+                    artifacts=kind==2 and amount or 0,
+                    source="story-trash-native-money-resource"}
+            end
+            return {gold=0,artifacts=0,
+                source="story-trash-native-chance-not-triggered"}
+        end
+        -- Native physical-actor resource rewards can also be specified
+        -- directly as a HeldenMoney struct rather than through a row.
+        local amountStruct=get(actor,"ResourceDropAmount")
+        local gold=number(get(amountStruct,"Gold"),0,CFG.MaxCoinsPerDrop) or 0
+        local artifacts=number(get(amountStruct,"Artifacts"),0,CFG.MaxCoinsPerDrop) or 0
+        if gold>0 or artifacts>0 then
+            return {gold=gold,artifacts=artifacts,
+                source="story-physics-resource-drop-amount"}
+        end
+    end
+    return inspectedZero
+end
+
 local function lootValue(actor)
     if not valid(actor) then return nil end
     local id=path(actor) or ""
@@ -1157,7 +1203,7 @@ local function lootValue(actor)
             inspectedZero={gold=0,artifacts=0,source="inspect-zero"}
         end
     end
-    if not ds then return inspectedZero end
+    if not ds then return storyFallbackValue(actor,inspectedZero) end
     -- Reflected actor DataName fields are used as keys; never infer rewards
     -- from an object's color or from an unrelated player's inventory.
     -- These are the actual reflected HeldenConstructActor methods.
@@ -1225,41 +1271,7 @@ local function lootValue(actor)
             " candidates="..table.concat(names,",")..
             " inspect="..tostring(inspectedZero~=nil))
     end
-    -- Story furniture uses HeldenTrashConstruct.RandomMoneySpawn
-    -- (HeldenMoneyResource {Type,Amount}) as its native money source.
-    -- The dungeon-only inspect Value and scrap data rows can be zero even
-    -- though this actor is configured to drop a currency on destruction.
-    -- Respect its native chance; never invent Gold or Artifacts for items
-    -- configured to drop only Scraps.
-    if S.mode==0 then
-        local native=get(actor,"RandomMoneySpawn")
-        local kind=enum(get(native,"Type")) -- EHeldenResource: 0 Scrap,1 Gold,2 Artifacts
-        local amount=number(get(native,"Amount"),0,CFG.MaxCoinsPerDrop)
-        local chance=tonumber(get(actor,"MoneySpawnChance"))
-        local canLoot=get(actor,"bCanSpawnLoot")
-        if canLoot~=false and amount and amount>0 and
-            (kind==1 or kind==2) and chance and chance>0 then
-            local probability=chance>1 and chance/100 or chance
-            probability=math.min(1,probability)
-            if probability>=1 or math.random()<probability then
-                return {gold=kind==1 and amount or 0,
-                    artifacts=kind==2 and amount or 0,
-                    source="story-trash-native-money-resource"}
-            end
-            return {gold=0,artifacts=0,
-                source="story-trash-native-chance-not-triggered"}
-        end
-        -- Native physical-actor resource rewards can also be specified
-        -- directly as a HeldenMoney struct rather than through a row.
-        local amountStruct=get(actor,"ResourceDropAmount")
-        local gold=number(get(amountStruct,"Gold"),0,CFG.MaxCoinsPerDrop) or 0
-        local artifacts=number(get(amountStruct,"Artifacts"),0,CFG.MaxCoinsPerDrop) or 0
-        if gold>0 or artifacts>0 then
-            return {gold=gold,artifacts=artifacts,
-                source="story-physics-resource-drop-amount"}
-        end
-    end
-    return inspectedZero
+    return storyFallbackValue(actor,inspectedZero)
 end
 -- The destroyed actor's GetInstigatorController() describes the actor's
 -- OWN creation context, not necessarily the attacking player. Never credit
