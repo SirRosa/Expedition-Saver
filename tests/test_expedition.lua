@@ -968,4 +968,47 @@ test("Story failure does not modify Expedition-only failure flags",function()
         "Expedition save repairs must remain disabled in Story")
 end)
 
+test("recent weapon attack identifies co-op killer even when both players stand close",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/OtherPlayer"})
+    local pawn=actor({_name="HeldenPlayerCharacter /Game/OtherPawn",
+        Money={Gold=10,Artifacts=1,Scraps=2}})
+    function second:GetPawn() return pawn end
+    function pawn:K2_GetActorLocation() return {X=1010,Y=2000,Z=300} end
+    t.listing.HeldenPlayerController[2]=second
+    local weapon=actor({_name="HeldenWeapon /Game/OtherHammer",
+        PreviousOwner=pawn})
+    t.tick(0)
+    local attack=t.hooks["/Script/Helden.HeldenWeapon:Attack_Server"]
+    assert(attack and attack.pre,"real server weapon action must be hooked")
+    attack.pre(weapon)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==0,
+        "actual attacker receives direct payout even with both nearby")
+    assert(t.corpse.Money.Gold==80,
+        "non-attacking nearby player must never receive gold")
+    assert(pawn.Money.Gold==30 and pawn.Money.Artifacts==7)
+end)
+
+test("simultaneous weapon attacks from co-op players stay ambiguous",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/OtherPlayer"})
+    local pawn=actor({_name="HeldenPlayerCharacter /Game/OtherPawn",
+        Money={Gold=10,Artifacts=1,Scraps=2}})
+    function second:GetPawn() return pawn end
+    function pawn:K2_GetActorLocation() return {X=1010,Y=2000,Z=300} end
+    t.listing.HeldenPlayerController[2]=second
+    local weapon1=actor({_name="HeldenWeapon /Game/Hammer1",
+        PreviousOwner=t.corpse})
+    local weapon2=actor({_name="HeldenWeapon /Game/Hammer2",
+        PreviousOwner=pawn})
+    t.tick(0)
+    local attack=t.hooks["/Script/Helden.HeldenWeapon:Attack_Server"]
+    attack.pre(weapon1);attack.pre(weapon2)
+    t.destroyLoot(true);t.tick(0)
+    assert(#t.spawned==2,"ambiguous attack owners must use physical fallback")
+    assert(t.corpse.Money.Gold==80 and pawn.Money.Gold==10)
+end)
+
 print("ALL TESTS PASSED ("..passed..")")
