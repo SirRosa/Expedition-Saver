@@ -1,4 +1,4 @@
--- Expedition Saver v0.1.0-alpha | Grain Rot (Helden / UE4SS 3.x)
+-- Expedition Saver v0.2.0-alpha | Grain Rot (Helden / UE4SS 3.x)
 -- Host-authoritative only. This mod is EXPERIMENTAL; back up the save.
 -- The latest 2026-11-20 USMAP confirms fields and reflected signatures,
 -- not the exact native save/death sequence. Every mutation is checked.
@@ -14,9 +14,11 @@ local CFG = {
     RespawnRetrySeconds = 2.5,
     MaxRespawnRequests = 3,
     BackupFile = true,
-    CoinActionKey = "F7", -- host only; aim at/grab Epic loot
-    MaxArtifactsPerConversion = 1000,
-    MaxCoinDistance = 650,
+    MaxCoinsPerDrop = 100000,
+    RewardDelaySeconds = 0.20,
+    RetryHookSeconds = 8,
+    HeartbeatDiagnosticsSeconds = 12,
+    RecoveryRetrySeconds = 2,
     Verbose = false,
 }
 local TAG = "[ExpeditionSaver] "
@@ -136,7 +138,7 @@ local function teleport(obj,dest)
     return ok and result~=false
 end
 local function onHost()
-    return valid(first("GameModeBase"))
+    return valid(first("HeldenGameMode")) or valid(first("GameModeBase"))
 end
 local function game()
     local gi=first("HeldenGameInstance")
@@ -146,7 +148,7 @@ local function game()
     -- Do not touch the normal game. GameModeType is the authoritative check.
     local gm=enum(get(gs,"GameModeType"))
     local sg=enum(get(save,"GameMode"))
-    if gm~=1 or (sg~=nil and sg~=1) then return nil end
+    if gm~=1 then return nil end -- GameState is authoritative; save may lag
     local run=get(gs,"CurrentDungeonRun")
     if not run then return nil end
     return {gi=gi,gs=gs,save=save,run=run,
@@ -158,7 +160,11 @@ local S={
     active=false,failed=false,phase=nil,pending={},
     sample=0,lastPoll=-1,nextBackupDepth=-1,
     nextBackupTime=-1,coinLedger={},respawned=0,
-    lastMode="unknown",lastDisplay=nil,warned=false
+    lastMode="unknown",lastDisplay=nil,warned=false,
+    lastHeartbeat=0,lastGuard=nil,recoveryRequired=false,
+    nextMachineRepair=0,machineRepairAttempts=0,
+    dropQueue={},destructionSeen={},dropAttempt=0,
+    deathEvents=0,newPawnEvents=0,rewardEvents=0
 }
 local function backupFile(slot)
     if not CFG.BackupFile then return nil end
@@ -219,6 +225,10 @@ local function keepExpedition(ctx)
     local seed=get(dungeon,"CurrentSeed")
     local lv=number(get(seed,"Level"),0,CFG.MaxDepth)
     if ctx.phase==1 or ctx.phase==2 then
+        if ctx.phase==1 and S.phase~=1 and S.recoveryRequired then
+            S.recoveryRequired=false;S.machineRepairAttempts=0
+            log("new expedition ride started; recovery finished")
+        end
         S.active=true
         if lv then
             if raw>=lv and raw<=lv+1 then S.offset=raw-lv end
@@ -231,7 +241,7 @@ local function keepExpedition(ctx)
     end
     if (ctx.phase==3 or ctx.phase==0) and S.active and ctx.failed then
         if not S.failed then
-            S.failed=true
+            S.failed=true;S.recoveryRequired=true
             log("failed Expedition run; keeping dungeon depth "..S.depth)
         end
     end
@@ -239,10 +249,16 @@ local function keepExpedition(ctx)
     -- set them at the instant the last party member dies.
     local md=get(ctx.save,"MetaData")
     if md and get(md,"bHasFailed")==true then
-        if put(md,"bHasFailed",false) then log("suppressed permanent failure in SaveGame metadata") end
+        if put(md,"bHasFailed",false) then
+            S.recoveryRequired=true
+            log("suppressed permanent failure in SaveGame metadata")
+        end
     end
     if get(ctx.gs,"bExpeditionFailed")==true then
-        if put(ctx.gs,"bExpeditionFailed",false) then log("cleared expedition failure in runtime") end
+        if put(ctx.gs,"bExpeditionFailed",false) then
+            S.recoveryRequired=true
+            log("cleared expedition failure in runtime")
+        end
     end
     if ctx.phase==3 or ctx.phase==0 then
         -- Do not clear CurrentDungeonRun.Flags.Failed: the end screen uses it.
@@ -299,7 +315,9 @@ local function captureDeath(char)
         started=os.clock(),attempts=0,nextRequest=0,
         spawned=nil,delivered=false}
     S.pending[key]=entry
-    log("player death detected; retained "..#inv.." item references; awaiting respawn")
+    S.deathEvents=S.deathEvents+1
+    log("DEATH HOOK player="..key.." phase="..ctx.phase..
+        " retained="..#inv.." awaiting server respawn")
 end
 local function respawnLocation()
     local lift=first("HeldenDungeonElevator")
@@ -349,10 +367,7 @@ local function processDeaths(ctx)
     local now=os.clock()
     for key,entry in pairs(S.pending) do
         -- Do not try respawn after the entire expedition has already failed.
-        if ctx.phase~=2 or ctx.failed then
-            log("respawn stopped: expedition run ended")
-            S.pending[key]=nil
-        elseif now-entry.started>22 then
+        if now-entry.started>35 then
             log("respawn timed out for "..key)
             S.pending[key]=nil
         else
@@ -488,12 +503,25 @@ local function convertCoin()
 end
 
 local function poll()
-    if not onHost() then return end
-    local ctx=game()
+    local now=os.clock()
+    local host=onHost()
+    local ctx=host and game()
+    if now-S.lastHeartbeat>=CFG.HeartbeatDiagnosticsSeconds then
+        S.lastHeartbeat=now
+        local gs=first("HeldenGameState")
+        local gi=first("HeldenGameInstance")
+        local save=gi and get(gi,"CurrentSaveGame")
+        log("HEARTBEAT host="..tostring(host).." GS="..tostring(valid(gs))..
+            " mode="..tostring(enum(get(gs,"GameModeType")))..
+            " save="..tostring(valid(save))..
+            " saveMode="..tostring(enum(get(save,"GameMode")))..
+            " phase="..tostring(ctx and ctx.phase)..
+            " deaths="..S.deathEvents.." destructionEvents="..S.rewardEvents)
+    end
     if not ctx then
         if S.lastMode~="nonexpedition" then
             S.lastMode="nonexpedition"
-            diag("not in Expedition; all mutations disabled")
+            log("inactive: missing authoritative Expedition context")
         end
         return
     end
@@ -532,12 +560,13 @@ local function watchControllerKilled(context)
     local old=get(pc,"LastPlayerChar")
     if valid(old) then captureDeath(old) end
 end
-local function watchNewPawn(context,_,newPawn)
+local function watchNewPawn(context,oldPawn,newPawn)
     local pc=unwrap(context)
     local pawn=unwrap(newPawn)
     if not valid(pc) or not valid(pawn) then return end
+    S.newPawnEvents=S.newPawnEvents+1
     local entry=S.pending[path(pc)]
-    if entry then entry.spawned=pawn end
+    if entry then entry.spawned=pawn;log("NEWPAWN event for pending death") end
 end
 local registered={}
 local function hook(f,pre,post)
