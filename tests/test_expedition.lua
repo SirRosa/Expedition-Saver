@@ -828,19 +828,19 @@ test("solo furniture reward credits wallet directly without coin actors",functio
     assert(t.corpse.Money.Gold==100,"two hooks must not credit twice")
 end)
 
-test("verified active damage overlap targets correct co-op player",function()
+test("verified projectile damage targets correct co-op player",function()
     local t=fixture()
     local second=actor({_name="HeldenPlayerController /Game/P2"})
     local secondPawn=actor({_name="HeldenPlayerCharacter /Game/P2Pawn",
         Money={Gold=5,Artifacts=1,Scraps=9}})
     function second:GetPawn() return secondPawn end
     t.listing.HeldenPlayerController[2]=second
-    local attackBox=actor({bDamageActive=true})
-    function attackBox:GetOwner() return secondPawn end
+    local projectile=actor()
+    function projectile:GetInstigatorController() return second end
     t.tick(0)
-    local h=t.hooks["/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin"]
-    assert(h and h.pre,"active damage event hook is required")
-    h.pre(attackBox,nil,t.loot)
+    local h=t.hooks["/Script/Helden.HeldenProjectile:OnDamagedActor"]
+    assert(h and h.pre,"reflected projectile damage hook is required")
+    h.pre(projectile,nil,t.loot)
     t.destroyLoot(true)
     t.tick(0)
     assert(#t.spawned==0)
@@ -901,13 +901,13 @@ test("two damage sources fall back to nearest player wallet",function()
         return {X=1010,Y=2000,Z=300}
     end
     t.listing.HeldenPlayerController[2]=second
-    local hit=t.hooks["/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin"]
-    local box1=actor({bDamageActive=true})
-    local box2=actor({bDamageActive=true})
-    function box1:GetOwner() return t.corpse end
-    function box2:GetOwner() return secondPawn end
+    local hit=t.hooks["/Script/Helden.HeldenProjectile:OnDamagedActor"]
+    assert(hit and hit.pre)
+    local p1=actor();local p2=actor()
+    function p1:GetInstigatorController() return t.pc end
+    function p2:GetInstigatorController() return second end
     t.tick(0)
-    hit.pre(box1,nil,t.loot);hit.pre(box2,nil,t.loot)
+    hit.pre(p1,nil,t.loot);hit.pre(p2,nil,t.loot)
     t.destroyLoot(true);t.tick(0)
     assert(#t.spawned==0,"simultaneous damage uses nearest, not physical coins")
     assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10)
