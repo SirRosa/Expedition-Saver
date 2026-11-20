@@ -2,8 +2,6 @@
 // WinMM PlaySoundW is synchronous *inside this child process*. The game
 // invokes it via UE4SS ExecuteAsync, never on Unreal's game thread.
 // No network access, registry writes, file modifications or persistence.
-#define UNICODE
-#define _UNICODE
 #include <windows.h>
 #include <shellapi.h>
 #include <mmsystem.h>
