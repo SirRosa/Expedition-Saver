@@ -1578,4 +1578,29 @@ test("client audio does not mutate loot/respawn/money on its non-authoritative i
         "client audio listener cannot move character or heal them")
 end)
 
+test("client replicated Dead hook catches death between polling frames",function()
+    local t=fixture(false,true,true)
+    t.tick(0) -- first locally alive
+    local h=t.hooks["/Script/Helden.HeldenCharacter:OnRep_CharacterState"]
+    assert(h and h.pre)
+    t.corpse.CharacterState=1;t.corpse.CharacterStats.CurrentHealth=0
+    h.pre(t.corpse) -- native replication calls even if next tick is delayed
+    t.pc._pawn=t.newPawn
+    t.pc.LastPlayerChar=t.newPawn
+    t.newPawn.CharacterStats.CurrentHealth=120
+    t.tick(0)
+    assert(#t.audioCommands==1,
+        "client needs replicated dead event when 300ms sampler misses the death")
+end)
+
+test("unknown local controller status never plays audio for remote pawn",function()
+    local t=fixture(false,true)
+    function t.pc:IsLocalController() return nil end
+    t.tick(0);t.killed()
+    for i=1,7 do t.tick(0) end
+    assert(t.newPawn.CharacterStats.CurrentHealth==120)
+    assert(#t.audioCommands==0,
+        "audio must require an explicitly locally controlled PC")
+end)
+
 print("ALL TESTS PASSED ("..passed..")")
