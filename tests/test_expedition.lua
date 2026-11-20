@@ -34,6 +34,7 @@ local function fixture()
     end
     local pc=actor({_name="HeldenPlayerController /Game/PC",LastPlayerChar=corpse})
     function corpse:GetController() return pc end
+    function corpse:K2_GetActorLocation() return {X=1000,Y=2000,Z=300} end
     function pc:GetPawn() return self._pawn end
     pc._pawn=corpse
     function pc:IsLocalController() return true end
