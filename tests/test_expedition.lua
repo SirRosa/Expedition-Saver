@@ -1216,6 +1216,7 @@ test("Story XP value can fund Gold when item has no money or scrap field",functi
     local t=fixture()
     t.switchMode(0)
     t.registry.HeldenDataSingleton=nil
+    t.loot.ConstructQuality=0
     function t.loot:GetInspectData()
         return {bIsInDungeon=false,XP=24,Quality=0,
             Value={Gold=0,Artifacts=0,Scraps=0}}
