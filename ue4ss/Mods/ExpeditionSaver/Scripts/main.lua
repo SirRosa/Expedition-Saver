@@ -2222,7 +2222,15 @@ local function immediatelyRequestRespawn(context)
 end
 local function watchReplicatedDeadState(context)
     local character=unwrap(context)
-    if not valid(character) or enum(get(character,"CharacterState"))~=1 then return end
+    if not valid(character) then return end
+    local currentState=enum(get(character,"CharacterState"))
+    if not onHost() and currentState~=1 then
+        -- Instant client revival signal, even for same-pawn fallbacks:
+        -- avoid waiting for the next 300ms scheduler callback.
+        if clientAudio.armed then observeClientRespawnAudio() end
+        return
+    end
+    if currentState~=1 then return end
     if not onHost() then
         -- Replicated Dead may be brief; arm the local listener before
         -- possession/LastPlayerChar replication changes references.
@@ -2265,6 +2273,9 @@ local function watchNewPawn(context,oldPawn,newPawn)
         local ok,isLocal=pcall(function() return pc:IsLocalController() end)
         if ok and isLocal==true then
             clientAudio.pendingPawn=pawn
+            -- OnNewPawn arrives at the actual replacement rather than at
+            -- a periodic timer; do not wait seconds for LastPlayerChar.
+            observeClientRespawnAudio()
         end
     end
     S.newPawnEvents=S.newPawnEvents+1
