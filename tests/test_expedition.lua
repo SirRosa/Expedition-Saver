@@ -18,6 +18,18 @@ local function fixture()
     local lift=actor({_name="HeldenDungeonElevator /Game/Lift",InteriorCollisionBox=actor(),
         HomeStationIdx=0,CurrentStationIdx=0,bInteractionLocked=false})
     local machine=actor({_name="HeldenElevatorMachine /Game/Machine",bInteractionLocked=true})
+    lift.ElevatorMachine=machine
+    local function component()
+        local c=actor()
+        function c:SetCollisionEnabled(v) self.collision=v end
+        function c:SetVisibility(v) self.visible=v end
+        return c
+    end
+    local barrier=actor({_name="BP_ExpeditionFailed_Actor_C /Game/Maps/Helden_Expedition.Helden_Expedition:PersistentLevel.BP_ExpeditionFailed_Actor_C_1",
+        bFailedExpedition=true,Box=component(),SM_SM_Door_Lock=component(),Cube=component()})
+    function barrier:OnRep_bFailedExpedition() self.onrep=true end
+    function barrier:UpdateCollisionSate() self.updated=true end
+    function barrier:SetActorEnableCollision(v) self.collision=v end
     function machine:SetCanBeInteracted_Auth(value) self.interactionEnabled=value end
     function machine:OnRequirementSysUpdate_Auth() end
     function machine:OnDungeonRunStateChanged(r) self.lastRun=r.State end
@@ -92,11 +104,20 @@ local function fixture()
         assert(cls==coinClass or cls==goldClass or cls==gearClass)
         local coin=actor(cls==gearClass and {ItemDurability=0,ItemDataAsset=nil} or
             {Money={Artifacts=0,Gold=0,Scraps=0}})
+        coin._coinClass=cls
+        coin._position={X=loc.X,Y=loc.Y,Z=loc.Z}
         function coin:K2_DestroyActor() self._valid=false end
+        function coin:SetReplicates(v) self.replicates=v end
+        function coin:SetActorHiddenInGame(v) self.hidden=v end
+        function coin:SetActorEnableCollision(v) self.collision=v end
+        function coin:K2_SetActorLocation(v) self._position=v;return true end
+        function coin:K2_GetActorLocation() return self._position end
+        function coin:GetClass() return self._coinClass end
         spawned[#spawned+1]={coin=coin,loc=loc}
         return coin
     end
-    local listing={HeldenPlayerController={pc},HeldenEquipableItem={item}}
+    local listing={HeldenPlayerController={pc},HeldenEquipableItem={item},
+        BP_ExpeditionFailed_Actor_C={barrier}}
     local clockcb
     local fakeio={open=function(fname,mode)
         if mode=="r" then
@@ -132,7 +153,8 @@ local function fixture()
     assert(clockcb,"game-thread timer not registered")
     local test={
         gm=gm,save=save,md=md,gi=gi,gs=gs,run=run,
-        lift=lift,machine=machine,pc=pc,corpse=corpse,newPawn=newPawn,item=item,loot=loot,
+        lift=lift,machine=machine,barrier=barrier,
+        pc=pc,corpse=corpse,newPawn=newPawn,item=item,loot=loot,
         world=world,registry=registry,listing=listing,spawned=spawned,
         hooks=hooks,keys=keys,logs=logs,files=files,counts=counts,
         tick=function(dt) now=now+(dt or 0.7);clockcb() end,
@@ -352,13 +374,11 @@ test("permadeath markers cleared during exploration, not only at end screen",fun
     assert(t.md.bHasFailed==false and t.gs.bExpeditionFailed==false)
 end)
 
-test("destroyed player gear is recreated once at lift after native respawn",function()
+test("no duplicate lost-item creation while the QOL insurance mod is installed",function()
     local t=fixture();t.tick();t.killed()
     t.item._valid=false
     t.tick(1.5);t.tick()
-    assert(#t.spawned==1,"must recreate lost item, not only move surviving actors")
-    assert(t.spawned[1].coin.ItemDurability==0)
-    t.tick(2);assert(#t.spawned==1,"must not duplicate lost inventory on next poll")
+    assert(#t.spawned==0,"item reconstruction is suspended to prevent QOL insurance duplication")
 end)
 
 test("OnPlayerKilled post requests respawn in the same engine event",function()
@@ -427,6 +447,55 @@ test("same-slot save instance swap retains depth and recovery",function()
     t.run.State=3;t.run.Flags=1;t.tick(0)
     assert(newSave.DungeonLevel==8,"depth should survive save object rotation")
     assert(newSave.MetaData.bHasFailed==false)
+end)
+
+test("the physical Expedition Failed door is actually disabled",function()
+    local t=fixture();t.tick()
+    t.run.State=3;t.run.Flags=1;t.md.bHasFailed=true
+    t.tick(2)
+    assert(t.barrier.bFailedExpedition==false)
+    assert(t.barrier.onrep and t.barrier.updated)
+    assert(t.barrier.collision==false)
+    assert(t.barrier.Box.collision==0)
+    assert(t.barrier.SM_SM_Door_Lock.visible==false)
+end)
+test("poll detects player death without Die_Auth or OnPlayerKilled callbacks",function()
+    local t=fixture()
+    t.corpse.CharacterState=0;t.corpse.CharacterStats.CurrentHealth=120
+    t.tick(0)
+    t.corpse.CharacterState=1;t.corpse.CharacterStats.CurrentHealth=0
+    t.tick(0)
+    assert(t.counts.respawn==1,"must respawn on observed Dead character state")
+    t.tick(0)
+    assert(t.newPawn.location and t.newPawn.location.Z==380)
+end)
+test("coin payout reports physical position above item, with visibility and replication",function()
+    local t=fixture();t.tick(0);t.destroyLoot();t.tick(0)
+    assert(#t.spawned==2)
+    for _,record in ipairs(t.spawned) do
+        assert(record.coin.replicates==true)
+        assert(record.coin.hidden==false)
+        assert(record.coin.collision==true)
+        assert(record.coin._position.Z>=430, "coin must spawn above furniture pivot")
+    end
+end)
+test("zero inspect payout falls back to patched live table",function()
+    local t=fixture();t.tick(0)
+    t.loot.StatsDataName="RustyJunk"
+    t.loot.GetInspectData=function()
+        return {bIsInDungeon=true,Value={Gold=0,Artifacts=0,Scraps=1}}
+    end
+    t.destroyLoot();t.tick(0)
+    assert(#t.spawned==2)
+    assert(t.spawned[1].coin.Money.Gold==45)
+    assert(t.spawned[2].coin.Money.Artifacts==2)
+end)
+test("nil game mode is safely stringified in diagnostic heartbeat",function()
+    local t=fixture()
+    t.gs.GameModeType=nil
+    t.save.GameMode=nil;t.md.GameMode=nil
+    t.tick(0)
+    for _,line in ipairs(t.logs) do assert(not line:find("poll error",1,true)) end
 end)
 
 print("ALL TESTS PASSED ("..passed..")")
