@@ -1,5 +1,19 @@
 # Grain Rot — Expedition Saver
 
+## v0.5.1-quickslots-compat — współpraca z ekwipunkiem 10-slotowym
+
+**Poprawka współpracy z GrainRotQuickJunk 0.2.5:**
+
+- Po respawnie gra może utworzyć nową postać, której `ItemSlots` ma początkowo 4 pola. Gdy zapisane wyposażenie miało slot `5–0`, `ExpeditionSaver` czeka (maksymalnie 40 cykli × 300 ms) na utworzenie pełnych 10 natywnych komponentów zamiast odzyskiwać przedmiot do innego slotu.
+- Przedmiot po natywnym odzyskaniu musi nie tylko należeć do postaci, ale też mieć `CurrentInventorySlot` i `CurrentSlot` powiązane z pierwotnym slotem nowej postaci. Weryfikacja obejmuje odczyt zwrotny.
+- Przy próbie odzyskiwania slotu `5–0` nie wystarcza znalezienie innej broni tej samej klasy. Do wykrycia duplikatu wykorzystywana jest oryginalna referencja albo `DynamicSaveName`.
+- Poprawiono nieprawidłowe założenie starego kodu: `HeldenCharacter.ItemSlots` zawiera `HeldenInventroySlot{SlotName,SlotComponent}`, **nie** `CurrentItemInSlot`. Źródłem przedmiotów jest `EquipedItems` oraz ich własne `PreviousOwner`, `CurrentSlot`, `CurrentInventorySlot`.
+- `GrainRotQOL` 0.1.2 automatycznie nie uruchamia drugiego systemu ubezpieczania wyposażenia, jeżeli wykryje włączony `ExpeditionSaver`.
+
+Używaj aktualnych wersji **wszystkich trzech** modów: `GrainRotQuickJunk`, `ExpeditionSaver`, `GrainRotQOL`. Modyfikacja nie ingeruje w naliczanie złota, żetonów ani w system porażki ekspedycji.
+
+**Testy symulacyjne nie gwarantują pełnego zachowania przedmiotów w grze.** Przetestuj na kopii zapisu, na hoście i po restarcie.
+
 ## v0.5.0-alpha — ochrona ekwipunku, waluty, fizyka monet i skarby
 
 **Wydanie testowe** po analizie rzeczywistego logu `UE4SS(4).log` z v0.4.
@@ -20,8 +34,8 @@ W v0.4 **respawn w windzie zadziałał**, ale log wykazał: `retained=1` i `EQUI
 ### Instalacja
 
 1. **Zrób kopię zapisu.** Dotyczy to zwłaszcza testowania śmierci i odtwarzania sprzętu.
-2. Pobierz `ExpeditionSaver-v0.5.0-alpha.zip` z [GitHub Actions](https://github.com/SirRosa/Expedition-Saver/actions).
-3. Usuń starą zawartość folderu `ue4ss\Mods\ExpeditionSaver` i wypakuj archiwum do `Grain Rot\Helden\Binaries\Win64\`. Gra powinna uruchomić jedynie wersję `v0.5.0-alpha` — sprawdź wpis w `ue4ss\UE4SS.log`.
+2. Pobierz `ExpeditionSaver-v0.5.1-quickslots-compat.zip` z [GitHub Actions](https://github.com/SirRosa/Expedition-Saver/actions).
+3. Usuń starą zawartość folderu `ue4ss\Mods\ExpeditionSaver` i wypakuj archiwum do `Grain Rot\Helden\Binaries\Win64\`. Gra powinna uruchomić jedynie wersję `v0.5.1-quickslots-compat` — sprawdź wpis w `ue4ss\UE4SS.log`.
 4. **Wyłącz GrainRotDepthKeeper**, który nadal był uruchomiony podczas testu v0.4. QOL pozostaw włączony, jeżeli testujesz jego wartości, ale w `GrainRotQOL\Scripts\main.lua` ustaw `InsuranceOnWipe = false`, aby uniknąć zdublowanych przedmiotów po porażce. Na serwerze mod musi być zainstalowany u hosta.
 
 ### Ważne warunki akceptacji
