@@ -754,4 +754,28 @@ test("distant fresh coins cannot be mistaken for native death drop",function()
     assert(other:IsValid() and other.Money.Gold==80)
 end)
 
+test("currency must not be destroyed if respawned pawn has no valid wallet",function()
+    local t=fixture()
+    t.newPawn.Money=nil
+    t.tick(0);t.killed()
+    local gold=makeCoin(t,"not_funded",
+        {Gold=80,Artifacts=4,Scraps=17})
+    for _=1,9 do t.tick(0) end
+    assert(gold:IsValid() and not gold.destroyed)
+    assert(gold.Money.Gold==80)
+    assert(t.item:IsValid())
+end)
+
+test("fresh same-value currency from a different world must not be removed",function()
+    local t=fixture()
+    function t.corpse:GetWorld() return t.world end
+    t.tick(0);t.killed()
+    local otherWorld=actor({_name="World /Game/Other"})
+    local elsewhere=makeCoin(t,"other_world",
+        {Gold=80,Artifacts=4,Scraps=17},1010,0.5,otherWorld)
+    for _=1,9 do t.tick(0) end
+    assert(elsewhere:IsValid() and not elsewhere.destroyed)
+    assert(t.newPawn.Money.Gold==80)
+end)
+
 print("ALL TESTS PASSED ("..passed..")")
