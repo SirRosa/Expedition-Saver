@@ -312,54 +312,63 @@ test("AI character death is ignored",function()
     assert(t.counts.respawn==0)
 end)
 test("hammer destruction automatically emits the original extraction values",function()
-    local t=fixture();t.tick()
-    t.destroyLoot()
-    t.tick(1)
-    assert(#t.spawned==2,"should drop gold and artifact coin actors")
-    assert(t.spawned[1].coin.Money.Gold==20)
-    assert(t.spawned[2].coin.Money.Artifacts==6)
-    assert(t.loot._valid~=false,"mod must not destroy loot itself")
+    local t=fixture();t.tick();t.destroyLoot();t.tick(1)
+    assert(#t.spawned==0,"furniture must never generate physical coins")
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
+        "Gold and Artifacts must be deposited directly")
+    assert(t.loot._valid~=false,"mod must not destroy furniture itself")
     assert(t.keys[118]==nil,"F7 must not be registered")
 end)
 test("two destruction signals never double-pay the same loot",function()
     local t=fixture();t.tick()
     t.destroyLoot();t.destroyLoot();t.tick(1)
-    assert(#t.spawned==2)
-    t.tick(1);assert(#t.spawned==2)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10)
+    t.tick(1)
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
+        "duplicate destruction callbacks must never pay twice")
 end)
 test("scrap/resource payout remains native, no added scrap coin",function()
     local t=fixture();t.tick();t.destroyLoot();t.tick(1)
-    assert(#t.spawned==2)
-    assert(t.spawned[1].coin.Money.Scraps==0)
-    assert(t.spawned[2].coin.Money.Scraps==0)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Scraps==17,"native scrap resource handling is unchanged")
 end)
 test("no rewards for actor outside dungeon",function()
     local t=fixture();t.tick()
     t.loot.OwningDungeon=nil
-    t.loot.GetInspectData=function() return {bIsInDungeon=false,Value={Gold=40,Artifacts=8}} end
+    t.loot.GetInspectData=function()
+        return {bIsInDungeon=false,Value={Gold=40,Artifacts=8}}
+    end
     t.destroyLoot();t.tick(1)
-    assert(#t.spawned==0)
+    assert(#t.spawned==0 and t.corpse.Money.Gold==80 and
+        t.corpse.Money.Artifacts==4,"outside dungeon no Expedition reward")
 end)
 test("no payout for zero coin value",function()
     local t=fixture();t.tick()
-    t.loot.GetInspectData=function() return {bIsInDungeon=true,Value={Gold=0,Artifacts=0,Scraps=10}} end
+    t.loot.GetInspectData=function()
+        return {bIsInDungeon=true,Value={Gold=0,Artifacts=0,Scraps=10}}
+    end
     t.destroyLoot();t.tick(1)
-    assert(#t.spawned==0)
+    assert(#t.spawned==0 and t.corpse.Money.Gold==80 and
+        t.corpse.Money.Artifacts==4)
 end)
 test("missing physical currency asset cannot invent the reward",function()
     local t=fixture();t.tick()
     t.registry.HeldenDataSingleton.ArtifactCoinActorClass=nil
-    t.destroyLoot();t.tick(10)
-    assert(#t.spawned==1,"Gold may succeed, but Artifact Coins must not be invented")
+    t.registry.HeldenDataSingleton.GoldCoinActorClass=nil
+    t.destroyLoot();t.tick(1)
+    assert(#t.spawned==0,"missing coin classes do not require physics fallback")
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
+        "currency is credited directly with no asset dependencies")
 end)
 test("PhysActorData fallback reads already patched QOL reward, without multiplying",function()
     local t=fixture();t.tick()
     t.loot.GetInspectData=nil
     t.loot.ConstructDataName="RustyJunk"
     t.destroyLoot();t.tick(1)
-    assert(#t.spawned==2)
-    assert(t.spawned[1].coin.Money.Gold==45)
-    assert(t.spawned[2].coin.Money.Artifacts==2)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==125 and t.corpse.Money.Artifacts==6,
+        "patched 45 Gold and 2 Artifacts must be credited once")
 end)
 test("hammer destruction below health zero is required for health trigger",function()
     local t=fixture();t.tick()
@@ -477,10 +486,9 @@ test("real HeldenConstructActor getter and weak dungeon pointer produce QOL payo
         return {Parsed_ScrapValue_Epic={Gold=60,Artifacts=4,Scraps=5}}
     end
     t.destroyLoot();t.tick(0)
-    assert(#t.spawned==2)
-    assert(t.spawned[1].coin.Money.Gold==60)
-    assert(t.spawned[2].coin.Money.Artifacts==4)
-    assert(t.spawned[1].coin.Money.Scraps==0)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==140 and t.corpse.Money.Artifacts==8)
+    assert(t.corpse.Money.Scraps==17)
 end)
 test("physics loot with no GetInspectData uses patched PhysActorData and weak ownership",function()
     local t=fixture();t.tick(0)
@@ -488,18 +496,19 @@ test("physics loot with no GetInspectData uses patched PhysActorData and weak ow
     t.loot.OwningDungeon={Get=function() return t.run.DungeonActor end}
     t.loot.StatsDataName="RustyJunk"
     t.destroyLoot();t.tick(0)
-    assert(#t.spawned==2)
-    assert(t.spawned[1].coin.Money.Gold==45)
-    assert(t.spawned[2].coin.Money.Artifacts==2)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==125 and t.corpse.Money.Artifacts==6)
 end)
 test("respawn and loot payout do not wait for os.clock CPU time",function()
     local t=fixture();t.tick(0);t.killed()
     t.tick(0)
-    assert(t.counts.respawn==1,"respawn should start on next engine tick")
+    assert(t.counts.respawn==1,"respawn starts on engine tick")
     t.tick(0)
     assert(t.newPawn.location and t.newPawn.location.Z==380)
     t.destroyLoot();t.tick(0)
-    assert(#t.spawned==2,"coin payout should not need CPU-time to elapse")
+    assert(#t.spawned==0)
+    assert(t.newPawn.Money.Gold==100 and t.newPawn.Money.Artifacts==10,
+        "furniture wallet payout must not need CPU time to elapse")
 end)
 test("run recovery starts on failed EndScreen even without earlier exploring heartbeat",function()
     local t=fixture()
@@ -539,28 +548,21 @@ test("poll detects player death without Die_Auth or OnPlayerKilled callbacks",fu
     assert(t.newPawn.location and t.newPawn.location.Z==380)
 end)
 test("coin payout reports physical position above item, with visibility and replication",function()
-    local t=fixture();t.tick(0);t.destroyLoot();t.tick(0)
-    assert(#t.spawned==2)
-    for _,record in ipairs(t.spawned) do
-        assert(record.coin.replicates==true)
-        assert(record.coin.hidden==false)
-        assert(record.coin.collision==true)
-        assert(record.coin._position.Z>=355, "coin must spawn above furniture pivot")
-        assert(record.coin.RootMesh.simulates==true and
-            record.coin.RootMesh.gravity==true,
-            "coin must simulate physical gravity")
-    end
+    local t=fixture();t.tick(0)
+    t.destroyLoot();t.tick(0)
+    assert(#t.spawned==0,"no actor/physics/gravity operations for furniture money")
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
+        "currency is stored in player wallet only")
 end)
 test("zero inspect payout falls back to patched live table",function()
     local t=fixture();t.tick(0)
-    t.loot.StatsDataName="RustyJunk"
     t.loot.GetInspectData=function()
-        return {bIsInDungeon=true,Value={Gold=0,Artifacts=0,Scraps=1}}
+        return {bIsInDungeon=true,Value={Gold=0,Artifacts=0,Scraps=0}}
     end
+    t.loot.StatsDataName="RustyJunk"
     t.destroyLoot();t.tick(0)
-    assert(#t.spawned==2)
-    assert(t.spawned[1].coin.Money.Gold==45)
-    assert(t.spawned[2].coin.Money.Artifacts==2)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==125 and t.corpse.Money.Artifacts==6)
 end)
 test("nil game mode is safely stringified in diagnostic heartbeat",function()
     local t=fixture()
@@ -677,9 +679,9 @@ test("default physics treasure uses mesh-matched live QOL PhysActorData reward",
     t.registry.HeldenDataSingleton.PhysTreasureContainer=
         actor({TreasureData={{DataName="RustyJunk",StaticMesh=m}}})
     t.destroyLoot();t.tick(0)
-    assert(#t.spawned==2,"generic treasure should not stop at zero ConstructAsset value")
-    assert(t.spawned[1].coin.Money.Gold==45)
-    assert(t.spawned[2].coin.Money.Artifacts==2)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==125 and t.corpse.Money.Artifacts==6,
+        "live table loot value must go into wallet without physics")
 end)
 test("failed native pickup never destroys the only surviving item",function()
     local t=fixture()
@@ -864,12 +866,13 @@ test("victim actor instigator cannot steal payout from uniquely close player",fu
 end)
 
 test("ambiguous multiplayer leaves physical coin fallback instead of wrong wallet",function()
-    local t=fixture()
-    t.tick(0)
-    t.destroyLoot()
-    t.tick(0)
-    assert(#t.spawned==2)
-    assert(t.corpse.Money.Gold==80 and t.corpse.Money.Artifacts==4)
+    local t=fixture();t.tick(0)
+    t.destroyLoot();t.tick(0)
+    local second=t.listing.HeldenPlayerController[2]:GetPawn()
+    assert(#t.spawned==0,"ambiguous multiplayer is no excuse for a coin drop")
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
+        "closer player must receive currency")
+    assert(second.Money.Gold==0 and second.Money.Artifacts==0)
 end)
 
 test("dead co-op partner is not treated as true single-player",function()
@@ -878,11 +881,10 @@ test("dead co-op partner is not treated as true single-player",function()
     local deadSoul=actor({_name="HeldenCharacterSoul /Game/Soul"})
     function second:GetPawn() return deadSoul end
     t.listing.HeldenPlayerController[2]=second
-    t.tick(0)
-    t.destroyLoot(true)
-    t.tick(0)
-    assert(#t.spawned==2,"unknown killer in co-op must fall back to world currency")
-    assert(t.corpse.Money.Gold==80)
+    t.tick(0);t.destroyLoot(true);t.tick(0)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
+        "only eligible living player gets the reward directly")
 end)
 
 test("two active damage sources make payout unassignable",function()
@@ -891,6 +893,9 @@ test("two active damage sources make payout unassignable",function()
     local secondPawn=actor({_name="HeldenPlayerCharacter /Game/P2Pawn",
         Money={Gold=5,Artifacts=1,Scraps=9}})
     function second:GetPawn() return secondPawn end
+    function secondPawn:K2_GetActorLocation()
+        return {X=1010,Y=2000,Z=300}
+    end
     t.listing.HeldenPlayerController[2]=second
     local hit=t.hooks["/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin"]
     local box1=actor({bDamageActive=true})
@@ -898,12 +903,11 @@ test("two active damage sources make payout unassignable",function()
     function box1:GetOwner() return t.corpse end
     function box2:GetOwner() return secondPawn end
     t.tick(0)
-    hit.pre(box1,nil,t.loot)
-    hit.pre(box2,nil,t.loot)
-    t.destroyLoot(true)
-    t.tick(0)
-    assert(#t.spawned==2)
-    assert(t.corpse.Money.Gold==80 and secondPawn.Money.Gold==5)
+    hit.pre(box1,nil,t.loot);hit.pre(box2,nil,t.loot)
+    t.destroyLoot(true);t.tick(0)
+    assert(#t.spawned==0,"simultaneous damage uses nearest, not physical coins")
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10)
+    assert(secondPawn.Money.Gold==5)
 end)
 
 test("Story mode native death respawns and recovers wallet plus inventory",function()
@@ -999,16 +1003,63 @@ test("simultaneous weapon attacks from co-op players stay ambiguous",function()
     function second:GetPawn() return pawn end
     function pawn:K2_GetActorLocation() return {X=1010,Y=2000,Z=300} end
     t.listing.HeldenPlayerController[2]=second
-    local weapon1=actor({_name="HeldenWeapon /Game/Hammer1",
-        PreviousOwner=t.corpse})
-    local weapon2=actor({_name="HeldenWeapon /Game/Hammer2",
-        PreviousOwner=pawn})
+    local weapon1=actor({_name="HeldenWeapon /Game/Hammer1",PreviousOwner=t.corpse})
+    local weapon2=actor({_name="HeldenWeapon /Game/Hammer2",PreviousOwner=pawn})
     t.tick(0)
     local attack=t.hooks["/Script/Helden.HeldenWeapon:Attack_Server"]
     attack.pre(weapon1);attack.pre(weapon2)
     t.destroyLoot(true);t.tick(0)
-    assert(#t.spawned==2,"ambiguous attack owners must use physical fallback")
-    assert(t.corpse.Money.Gold==80 and pawn.Money.Gold==10)
+    assert(#t.spawned==0,"multiple attackers fall back to nearest player wallet")
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10)
+    assert(pawn.Money.Gold==10)
+end)
+
+test("nearest player receives reward even with a one-millimeter difference",function()
+    local t=fixture()
+    local other=actor({_name="HeldenPlayerController /Game/Nearer"})
+    local pawn=actor({_name="HeldenPlayerCharacter /Game/NearerPawn",
+        Money={Gold=10,Artifacts=1,Scraps=9}})
+    function other:GetPawn() return pawn end
+    -- Loot is at Y=1980. Original player is at Y=2000 (20cm),
+    -- second player at Y=1999.9 (19.9cm): exactly a 1mm difference.
+    function pawn:K2_GetActorLocation()
+        return {X=1000,Y=1999.9,Z=300}
+    end
+    t.listing.HeldenPlayerController[2]=other
+    t.tick(0);t.destroyLoot(true);t.tick(0)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==80)
+    assert(pawn.Money.Gold==30 and pawn.Money.Artifacts==7,
+        "1mm must select the closer player with no tolerance band")
+end)
+
+test("an exact distance tie is broken deterministically by controller name",function()
+    local t=fixture()
+    local other=actor({_name="HeldenPlayerController /Game/A_First"})
+    local pawn=actor({_name="HeldenPlayerCharacter /Game/TiedPawn",
+        Money={Gold=10,Artifacts=1,Scraps=9}})
+    function other:GetPawn() return pawn end
+    function pawn:K2_GetActorLocation()
+        return {X=1000,Y=2000,Z=300}
+    end
+    t.listing.HeldenPlayerController[2]=other
+    t.tick(0);t.destroyLoot(true);t.tick(0)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==80)
+    assert(pawn.Money.Gold==30 and pawn.Money.Artifacts==7)
+end)
+
+test("missing wallet defers reward without spawning physical currency",function()
+    local t=fixture()
+    t.tick(0)
+    t.corpse.Money=nil
+    t.destroyLoot(true);t.tick(0)
+    assert(#t.spawned==0)
+    t.corpse.Money={Gold=80,Artifacts=4,Scraps=17}
+    t.tick(0)
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
+        "queued payout must deliver after the recipient has a wallet")
+    assert(#t.spawned==0)
 end)
 
 print("ALL TESTS PASSED ("..passed..")")
