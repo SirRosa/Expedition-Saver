@@ -850,4 +850,38 @@ test("ambiguous multiplayer leaves physical coin fallback instead of wrong walle
     assert(t.corpse.Money.Gold==80 and t.corpse.Money.Artifacts==4)
 end)
 
+test("dead co-op partner is not treated as true single-player",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/DeadPartner"})
+    local deadSoul=actor({_name="HeldenCharacterSoul /Game/Soul"})
+    function second:GetPawn() return deadSoul end
+    t.listing.HeldenPlayerController[2]=second
+    t.tick(0)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==2,"unknown killer in co-op must fall back to world currency")
+    assert(t.corpse.Money.Gold==80)
+end)
+
+test("two active damage sources make payout unassignable",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/P2"})
+    local secondPawn=actor({_name="HeldenPlayerCharacter /Game/P2Pawn",
+        Money={Gold=5,Artifacts=1,Scraps=9}})
+    function second:GetPawn() return secondPawn end
+    t.listing.HeldenPlayerController[2]=second
+    local hit=t.hooks["/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin"]
+    local box1=actor({bDamageActive=true})
+    local box2=actor({bDamageActive=true})
+    function box1:GetOwner() return t.corpse end
+    function box2:GetOwner() return secondPawn end
+    t.tick(0)
+    hit.pre(box1,nil,t.loot)
+    hit.pre(box2,nil,t.loot)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==2)
+    assert(t.corpse.Money.Gold==80 and secondPawn.Money.Gold==5)
+end)
+
 print("ALL TESTS PASSED ("..passed..")")
