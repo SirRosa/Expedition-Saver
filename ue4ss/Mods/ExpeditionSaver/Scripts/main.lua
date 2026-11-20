@@ -651,16 +651,23 @@ local function lootValue(actor)
     if normalized:find("coin",1,true) or normalized:find("pickup",1,true) then return nil end
     local ds=getDataSingleton()
     local inspected
+    local inspectedZero
     pcall(function() inspected=actor:GetInspectData() end)
     if inspected and get(inspected,"bIsInDungeon")==true then
         local value=get(inspected,"Value")
         if value then
             local gold=number(get(value,"Gold"),0,CFG.MaxCoinsPerDrop) or 0
             local artifacts=number(get(value,"Artifacts"),0,CFG.MaxCoinsPerDrop) or 0
-            return {gold=gold,artifacts=artifacts,source="inspect"}
+            if gold>0 or artifacts>0 then
+                return {gold=gold,artifacts=artifacts,source="inspect"}
+            end
+            -- Some native physical treasure objects expose an inspect value
+            -- of zero while their DataTable extraction value is nonzero.
+            -- Try the actual data row before declaring no payout.
+            inspectedZero={gold=0,artifacts=0,source="inspect-zero"}
         end
     end
-    if not ds then return nil end
+    if not ds then return inspectedZero end
     -- Reflected actor DataName fields are used as keys; never infer rewards
     -- from an object's color or from an unrelated player's inventory.
     -- These are the actual reflected HeldenConstructActor methods.
@@ -686,10 +693,10 @@ local function lootValue(actor)
     -- Non-construct physical loot uses PhysActorData, where QOL multiplies
     -- Parsed_ScrapReward.Gold. No additional multiplier is applied here.
     local n=get(actor,"StatsDataName") or get(actor,"ConstructDataName")
-    if not n then return nil end
+    if not n then return inspectedZero end
     local row=rowOf(get(ds,"PhysActorDataTable"),n)
     local value=row and get(row,"Parsed_ScrapReward")
-    if not value then return nil end
+    if not value then return inspectedZero end
     return {gold=number(get(value,"Gold"),0,CFG.MaxCoinsPerDrop) or 0,
         artifacts=number(get(value,"Artifacts"),0,CFG.MaxCoinsPerDrop) or 0,
         source="physical-table"}
