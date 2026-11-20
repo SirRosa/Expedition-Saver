@@ -1,55 +1,46 @@
 # Grain Rot — Expedition Saver
 
-## v0.4.0-alpha — przebudowa na podstawie rzeczywistego logu
+## v0.5.0-alpha — ochrona ekwipunku, waluty, fizyka monet i skarby
 
-**Uwaga:** jest to testowa wersja gameplay, a nie potwierdzona poprawka działająca w grze. Poprzednie v0.1–v0.3 nie zrealizowały oczekiwanych funkcji u użytkownika. Zmiany v0.4 są oparte na konkretnych zdarzeniach z pliku `UE4SS(2).log` i na nowych mapowaniach.
+**Wydanie testowe** po analizie rzeczywistego logu `UE4SS(4).log` z v0.4.
 
-### Co udowodnił log v0.3
+W v0.4 **respawn w windzie zadziałał**, ale log wykazał: `retained=1` i `EQUIPMENT native=0 moved=1`. Przedmiot został przeniesiony **na podłogę windy**, zamiast do slotu. Nie było też żadnego zapisu pieniędzy. Zwykłe meble generowały monety (np. Gold x9, x15, x45), ale bez włączonej symulacji fizyki. Wartościowe `BP_DefaultPhysTreasure_C` docierały do hooka, lecz otrzymywały `no coin payout`.
 
-- Wszystkie hooki zostały zarejestrowane, host miał `GameModeType=1` i rzeczywisty tryb Expedition.
-- **0** wywołań `Die_Auth` i `OnPlayerKilled` podczas śmierci gracza. To była zasadnicza przyczyna braku respawnu.
-- **369** zdarzeń niszczenia. Kod odnotował `DROP gold=39` za `Radiator_01_C`, ale nie sprawdzał, czy moneta jest widoczna lub możliwa do podniesienia.
-- Gra rzeczywiście zakończyła ekspedycję (`EndDungeonRunSequence_Multicast`); reset `GameState` nie otworzył windy.
-- W zrzucie obiektów jest osobny **`BP_ExpeditionFailed_Actor_C`**, zawierający `bFailedExpedition`, `Box`, `SM_SM_Door_Lock`, `UpdateCollisionSate`.
-- W logu ładowały się **równolegle** Expedition Saver, GrainRotDepthKeeper i GrainRotQOL. QOL samodzielnie odtworzył jeden przedmiot po porażce.
+### Zmiany v0.5
 
-[Pełna analiza logu v0.3](docs/live-session-audit-2026-11-20.md)
-
-### Zmiany v0.4
-
-| Funkcja | Nowa metoda |
+| Funkcja | Nowa implementacja |
 |---|---|
-| Respawn w windzie | Co 300 ms sprawdza `HeldenPlayerController`, aktywnego pawna, `SoulCharacter`, `LastPlayerChar`, stan `ECharacterState.Dead=1` i `CurrentHealth`. Zapisuje migawkę wyposażenia przed śmiercią. Dodatkowo nasłuchuje `OnRep_CharacterState`. |
-| Awaryjne odrodzenie | Najpierw trzy próby natywnego `RespawnCharacter_Server`. Jeśli silnik ich nie przyjmie, próba wskrzeszenia i przejęcia **istniejącego**, nadal ważnego aktora gracza, z przemieszczeniem do windy. |
-| Koniec permadeath i ponowny zjazd | Oprócz flag `GameState` naprawia właściwą maszynę `lift.ElevatorMachine` i jej `bUseInteractRequirement`. Wyłącza fizyczną blokadę `BP_ExpeditionFailed_Actor_C`: flagę, kolizje komponentów i widoczność zamka. Nie wymusza automatycznego zjazdu. |
-| Nagroda po zniszczeniu | Nie używa F7. Fizyczne złoto i Artifact Coins pojawiają się ~130 jednostek nad zniszczonym obiektem, po czym kod próbuje włączyć replikację, widoczność i kolizję. Loguje klasę, współrzędne i wynik prób. |
-| Współpraca z QOL | Płatności z bieżącego `GetInspectData` lub aktualnych wierszy DataTable (po modyfikacji QOL). W przypadku `Value=0` również sprawdza wiersz tabeli, zamiast natychmiast kończyć. Nie mnoży ponownie wartości. |
-| Ochrona ekwipunku | Zachowuje referencje i migawkę przed śmiercią; **domyślnie wyłącza klonowanie zniszczonych przedmiotów**, aby nie dublować ubezpieczenia QOL. |
+| **Odrodzenie z wyposażeniem** | Przed śmiercią zapisuje do 64 przedmiotów z `EquipedItems`, **wszystkich** `ItemSlots[].CurrentItemInSlot` i prawidłowo przypisanych przedmiotów gracza. Po respawnie próbuje ich **natywnego podniesienia** poprzez `Interact(InCharacter)`, a następnie `Interact_Server(InCharacter, InInteraction)`. Weryfikuje prawdziwe sloty. Wielokrotne próby są ograniczone, z ochroną przed duplikacją. |
+| **Odtwarzanie zniszczonych przedmiotów** | Jeżeli oryginalny aktor nie istnieje i nie ma go w ekwipunku, próbuje jednorazowo zespawnować aktor tej samej klasy, z zachowanym assetem, trwałością i enchantmentem, a następnie natywnie go podnieść. Nie odtwarza bez końca. |
+| **Ochrona walut** | Zapisuje Gold, Artifact Coins i Scraps z `HeldenCharacter.Money` w trakcie eksploracji, **przed śmiercią**. Po respawnie uzupełnia tylko brakującą różnicę na nowym pawnie. Nigdy nie zmniejsza wyższego salda. |
+| **Monety na ziemi** | Na `RootMesh` fizycznych monet włącza `SetSimulatePhysics(true)`, `SetEnableGravity(true)`, `WakeAllRigidBodies()`; monety spawnują bliżej obiektu. Log podaje stan symulacji i grawitacji. |
+| **Biały, niebieski i fioletowy loot** | Dla `BP_DefaultPhysTreasure_C` sprawdza `GetInspectData`, `GetConstructAssetData`, aktualne po QOL wiersze `PhysActorDataTable` oraz mapuje `PhysTreasureContainer.TreasureData` na mesh przedmiotu. **Zero z pierwszego źródła nie kończy wyliczenia.** |
+| **Zwykłe meble** | Kwoty nadal pochodzą z aktualnych danych gry po modyfikacjach QOL; mod nie nakłada drugiego mnożnika. |
 
-## Instalacja
+### Instalacja
 
-1. **Zrób kopię zapisu** przed testami, szczególnie ze względu na eksperymentalne wskrzeszanie postaci.
-2. Pobierz `ExpeditionSaver-v0.4.0-alpha.zip` z [GitHub Actions](https://github.com/SirRosa/Expedition-Saver/actions).
-3. Usuń starą zawartość `Grain Rot\Helden\Binaries\Win64\ue4ss\Mods\ExpeditionSaver`; rozpakuj ZIP do `Grain Rot\Helden\Binaries\Win64\`.
-4. Instalacja **tylko u hosta**. Pozostaw włączony mod QOL do sprawdzenia mnożników, ale wyłącz w nim `InsuranceOnWipe` na czas testu odzyskiwania przedmiotów. **Całkowicie wyłącz Depth Keeper**, by oba mody nie modyfikowały stanu tej samej ekspedycji.
-5. Sprawdź w logu `[ExpeditionSaver] v0.4.0-alpha loaded`.
+1. **Zrób kopię zapisu.** Dotyczy to zwłaszcza testowania śmierci i odtwarzania sprzętu.
+2. Pobierz `ExpeditionSaver-v0.5.0-alpha.zip` z [GitHub Actions](https://github.com/SirRosa/Expedition-Saver/actions).
+3. Usuń starą zawartość folderu `ue4ss\Mods\ExpeditionSaver` i wypakuj archiwum do `Grain Rot\Helden\Binaries\Win64\`. Gra powinna uruchomić jedynie wersję `v0.5.0-alpha` — sprawdź wpis w `ue4ss\UE4SS.log`.
+4. **Wyłącz GrainRotDepthKeeper**, który nadal był uruchomiony podczas testu v0.4. QOL pozostaw włączony, jeżeli testujesz jego wartości, ale w `GrainRotQOL\Scripts\main.lua` ustaw `InsuranceOnWipe = false`, aby uniknąć zdublowanych przedmiotów po porażce. Na serwerze mod musi być zainstalowany u hosta.
 
-## Kolejność testów
+### Ważne warunki akceptacji
 
-1. Najpierw rozbij zwykły i fioletowy przedmiot podczas aktywnej wyprawy. Sprawdź, czy fizyczne monety naprawdę da się zobaczyć i podnieść. Potrzebne logi: `DESTRUCTION`, `COIN PHYSICAL`, `DROP gold`, `DROP artifacts`.
-2. Na testowym zapisie z tanim wyposażeniem umrzyj. Oczekiwane wpisy: `PLAYER STATE`, `PLAYER DEATH queued`, `NATIVE RESPAWN`, ewentualnie `REVIVE FALLBACK`.
-3. Po pełnym wipe sprawdź fizyczne drzwi windy. Log `FAILURE DOOR` poda stan blokady, a `RECOVERY` pokaże stan runu. Sprawdź prawdziwy zjazd — nie tylko reset licznika.
+- Po śmierci postać rzeczywiście ma wszystkie wcześniej posiadane przedmioty **w slotach** i właściwe Gold/Artifacts/Scraps. Samo leżenie przedmiotu w windzie nie jest pełnym sukcesem.
+- `INVENTORY RESULT inventory=N floor_or_missing=0 fullyRestored=true` oznacza, że kod rozpoznał wszystkie zapisane przedmioty w natywnym ekwipunku. Jeśli `floor_or_missing>0`, log wyraźnie wskazuje niepowodzenie.
+- `MONEY RESTORE` pokazuje salda przed i po odzyskaniu. **Uwaga:** natywna gra może również porzucić walutę w miejscu śmierci. W v0.5 nie mamy jeszcze gwarancji eliminacji ewentualnych duplikatów przy jej późniejszym podniesieniu.
+- `COIN PHYSICAL ... simulatesPhysics=true gravity=true` powinno potwierdzić fizykę; faktyczny ruch należy sprawdzić wzrokowo w grze.
+- `TREASURE REWARD UNRESOLVED` oznacza, że nie udało się przypisać rzeczywistego rekordu wartości danemu skarbowi. Mod nie wymyśla nagrody, ale loguje kandydatów do dalszej analizy.
+- Status `Expedition Failed` i ponowny zjazd windy **nie były testowane w logu v0.4**, a więc nie ma nowego potwierdzenia ich działania.
 
-**Jeżeli funkcje nie zadziałają, potrzebny będzie nowy `UE4SS.log` z v0.4.** Mamy już log rzeczywistej sesji v0.3, więc dalsze poprawki będą dotyczyć niepotwierdzonych mechanizmów, a nie ponownego zgadywania.
+### Ograniczenia bezpieczeństwa
 
-## Ograniczenia techniczne
+**Nie ma jeszcze gwarancji pełnego przywrócenia ekwipunku.** Jeśli silnik odrzuci natywną interakcję, mod pozostawia istniejący lub utworzony przedmiot **na podłodze windy** zamiast usuwać go. Nie manipuluje na ślepo niezidentyfikowanymi wskaźnikami slotów, aby nie uszkodzić zapisu. Rzeczywiste zachowanie `Interact` trzeba potwierdzić w grze.
 
-- Wskrzeszenie starego pawna działa tylko, jeśli silnik go jeszcze nie zniszczył; nie ma możliwości odtworzenia całego stanu klienta z samego USMAP.
-- Wyłączenie kolizji `BP_ExpeditionFailed_Actor_C` nie gwarantuje, że natywny serwer rozpocznie nowy przejazd. To osobna weryfikacja.
-- `COIN PHYSICAL` dowodzi tylko odczytanej pozycji i prób konfiguracji; nie gwarantuje poprawnej replikacji ani możliwości podniesienia, dopóki nie zostanie to przetestowane w grze.
-- Przechwycenie i odtworzenie przedmiotów jest obecnie niepełne, jeśli silnik niszczy oryginalny aktor. Nacisk v0.4: działający respawn, fizyczny zjazd oraz widoczne monety bez duplikacji.
-- Automatyczne testy GitHub Actions używają symulowanego API. **Nie są dowodem działania w Grain Rot**.
+Testy GitHub Actions są oparte na symulowanym API UE4SS, a nie na uruchomionym Grain Rot.
 
-## Dokumentacja
+### Dokumentacja
 
-[Analiza USMAP](docs/mapping-analysis-2026-11-20.md) · [Analiza faktycznego logu v0.3](docs/live-session-audit-2026-11-20.md)
+- [Audyt logu v0.4](docs/live-session-audit-v0.4-2026-11-20.md)
+- [Audyt logu v0.3](docs/live-session-audit-2026-11-20.md)
+- [Analiza USMAP](docs/mapping-analysis-2026-11-20.md)
