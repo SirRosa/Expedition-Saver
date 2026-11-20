@@ -29,5 +29,7 @@ jobs:
           curl -fsSL --retry 2 "$base/current-schema.json.gz" -o /tmp/current-schema.json.gz
           gzip -dc /tmp/current-schema.json.gz > /tmp/schema.json
           python3 -c "import json; j=json.load(open('/tmp/schema.json')); print('ROOT KEYS:',list(j)[:12]); print('SAMPLE:',str(j)[:2400])"
+          echo '=== ACTOR creation-age and destruction methods ==='
+          grep -E 'Function /Script/Engine.Actor:(GetGameTimeSinceCreation|K2_DestroyActor)' /tmp/objects.txt || true
           echo '=== DUMP samples ==='
           head -n 12 /tmp/objects.txt
