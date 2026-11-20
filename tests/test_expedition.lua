@@ -9,7 +9,7 @@ end
 local function fixture()
     local now=0
     local registry,hooks,keys,files,logs,spawned={},{},{},{},{},{}
-    local counts={clock=0,first=0,all=0,respawn=0,teleport=0}
+    local counts={clock=0,first=0,all=0,byClass={},respawn=0,teleport=0}
     local gm=actor({_name="GameMode /Game/GM"})
     local md={GameSlot=0,GameMode=1,bHasFailed=false}
     local save=actor({_name="SaveGame /Game/S0",MetaData=md,GameMode=1,
@@ -181,7 +181,11 @@ local function fixture()
         io=fakeio,
         print=function(msg) logs[#logs+1]=msg end,
         FindFirstOf=function(cls) counts.first=counts.first+1;return registry[cls] end,
-        FindAllOf=function(cls) counts.all=counts.all+1;return listing[cls] or {} end,
+        FindAllOf=function(cls)
+            counts.all=counts.all+1
+            counts.byClass[cls]=(counts.byClass[cls] or 0)+1
+            return listing[cls] or {}
+        end,
         RegisterHook=function(name,pre,post)
             hooks[name]={pre=pre,post=post}
             return 100,101
@@ -1060,6 +1064,121 @@ test("missing wallet defers reward without spawning physical currency",function(
     assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
         "queued payout must deliver after the recipient has a wallet")
     assert(#t.spawned==0)
+end)
+
+test("Story furniture wallet reward does not require World actor",function()
+    local t=fixture()
+    t.switchMode(0)
+    function t.loot:GetWorld() return nil end
+    t.tick(0);t.destroyLoot(true);t.tick(0)
+    assert(#t.spawned==0,"wallet-only payout must never create coin actors")
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
+        "Story furniture with a valid position must award even without World")
+end)
+
+test("Story trash native Gold resource pays wallet with zero inspect value",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.registry.HeldenDataSingleton=nil
+    t.loot.RandomMoneySpawn={Type="EHeldenResource::Gold",Amount=7}
+    t.loot.MoneySpawnChance=1
+    t.loot.bCanSpawnLoot=true
+    function t.loot:GetInspectData()
+        return {bIsInDungeon=false,Value={Gold=0,Artifacts=0,Scraps=9}}
+    end
+    t.tick(0);t.destroyLoot(true);t.tick(0)
+    assert(t.corpse.Money.Gold==87 and t.corpse.Money.Artifacts==4)
+    assert(#t.spawned==0)
+end)
+
+test("Story trash native Artifact Coins resource pays wallet",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.registry.HeldenDataSingleton=nil
+    t.loot.RandomMoneySpawn={Type="EHeldenResource::Artifacts",Amount=3}
+    t.loot.MoneySpawnChance=100 -- 100 percent also supported
+    t.tick(0);t.destroyLoot(true);t.tick(0)
+    assert(t.corpse.Money.Gold==80 and t.corpse.Money.Artifacts==7)
+    assert(#t.spawned==0)
+end)
+
+test("Story native resource configured as Scraps never fabricates Gold or tokens",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.registry.HeldenDataSingleton=nil
+    t.loot.RandomMoneySpawn={Type=0,Amount=200}
+    t.loot.MoneySpawnChance=100
+    t.tick(0);t.destroyLoot(true);t.tick(0)
+    assert(t.corpse.Money.Gold==80 and t.corpse.Money.Artifacts==4)
+    assert(t.corpse.Money.Scraps==17 and #t.spawned==0)
+end)
+
+test("Story physics resource amount pays both currencies when no table",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.registry.HeldenDataSingleton=nil
+    t.loot.ResourceDropAmount={Gold=6,Artifacts=2,Scraps=10}
+    function t.loot:GetInspectData()
+        return {bIsInDungeon=false,Value={Gold=0,Artifacts=0,Scraps=10}}
+    end
+    t.tick(0);t.destroyLoot(true);t.tick(0)
+    assert(t.corpse.Money.Gold==86 and t.corpse.Money.Artifacts==6)
+    assert(t.corpse.Money.Scraps==17)
+    assert(#t.spawned==0)
+end)
+
+test("Story destroy collision multicast pays only dead furniture",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.registry.HeldenDataSingleton=nil
+    t.loot.RandomMoneySpawn={Type=1,Amount=8}
+    t.loot.MoneySpawnChance=1
+    t.tick(0)
+    local h=t.hooks["/Script/Helden.HeldenConstructActor:DisableCollision_Multicast"]
+    assert(h and h.pre)
+    t.loot.StatsComponent.CurrentHealth=12
+    h.pre(t.loot);t.tick(0)
+    assert(t.corpse.Money.Gold==80,
+        "construct placement/collision must not accidentally pay")
+    t.loot.StatsComponent.CurrentHealth=0
+    h.pre(t.loot);t.tick(0)
+    assert(t.corpse.Money.Gold==88 and #t.spawned==0,
+        "destroyed Story construct must credit native reward")
+    h.pre(t.loot);t.tick(0)
+    assert(t.corpse.Money.Gold==88,"no duplicate payout from repeated multicast")
+end)
+
+test("healthy gameplay amortizes coin inventory and controller UObject scans",function()
+    local t=fixture()
+    for i=1,65 do t.tick(0) end
+    local c=t.counts.byClass
+    assert((c.HeldenPhysicsCoin or 0)<=4,
+        "full coin snapshot may run at most about every 9s when healthy")
+    assert((c.HeldenEquipableItem or 0)<=4,
+        "world item scan must be cached instead of every 1.2s")
+    assert((c.HeldenPlayerController or 0)<=10,
+        "world controller list must be reused across game-thread polls")
+end)
+
+test("critical health refreshes coin baseline more often for death safety",function()
+    local t=fixture()
+    t.tick(0)
+    local before=t.counts.byClass.HeldenPhysicsCoin or 0
+    t.corpse.CharacterStats.CurrentHealth=20
+    for i=1,10 do t.tick(0) end
+    local after=t.counts.byClass.HeldenPhysicsCoin or 0
+    assert(after>before,"low-health baseline must refresh near death")
+end)
+
+test("native death coin cleanup does not rescan the whole world every poll",function()
+    local t=fixture()
+    t.tick(0);t.killed()
+    -- Native coins may arrive late; the cleanup window stays active
+    -- without doing a massive UObject search every 300ms.
+    for i=1,25 do t.tick(0) end
+    local count=t.counts.byClass.HeldenPhysicsCoin or 0
+    assert(count<=7,"death cleanup should use a bounded 2.4s scan cadence")
+    assert(t.newPawn.Money.Gold==80 and t.newPawn.Money.Artifacts==4)
 end)
 
 print("ALL TESTS PASSED ("..passed..")")
