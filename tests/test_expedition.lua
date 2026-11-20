@@ -6,7 +6,7 @@ local function actor(fields)
     function a:GetFullName() return self._name or tostring(self) end
     return a
 end
-local function fixture(useCoinNotifications,audioPresent)
+local function fixture(useCoinNotifications,audioPresent,isClient)
     local now=0
     local coinCallbacks={}
     local audioCommands={}
@@ -94,6 +94,10 @@ local function fixture(useCoinNotifications,audioPresent)
     registry.HeldenGameState=gs;registry.HeldenDungeonElevator=lift
     registry.HeldenElevatorMachine=machine
     registry.HeldenGameMode=gm
+    if isClient then
+        registry.HeldenGameMode=nil
+        registry.GameModeBase=nil
+    end
     local data=actor({_name="DataSingleton /Game/DS"})
     local coinClass=actor({_name="Class /Game/BP_ArtifactCoin"})
     local goldClass=actor({_name="Class /Game/BP_GoldCoin"})
@@ -1457,6 +1461,120 @@ test("respawn sound missing files is fail-soft and does not block respawn",funct
         if line:find("RESPAWN SOUND missing",1,true) then warning=warning+1 end
     end
     assert(warning==1,"warn only once for missing audio asset")
+end)
+
+test("client local first join is silent, then witnessed native respawn plays once",function()
+    local t=fixture(false,true,true)
+    t.tick(0) -- client has no authoritative GameMode and is alive
+    assert(#t.audioCommands==0)
+    t.corpse.CharacterStats.CurrentHealth=0
+    t.corpse.CharacterState=1
+    t.tick(0)
+    assert(#t.audioCommands==0,"death is not a respawn")
+    t.pc._pawn=t.newPawn
+    t.pc.LastPlayerChar=t.newPawn
+    t.newPawn.CharacterStats.CurrentHealth=120
+    t.tick(0)
+    assert(#t.audioCommands==1,
+        "client must hear audio after its own native dead-to-alive transition")
+    for i=1,25 do t.tick(0) end
+    assert(#t.audioCommands==1,"must never replay in a healthy state")
+    assert(t.counts.respawn==0,
+        "client-side audio observer must not call server respawn")
+end)
+
+test("client with GetPawn=nil uses LastPlayerChar and hears respawn",function()
+    local t=fixture(false,true,true)
+    function t.pc:GetPawn() return nil end
+    t.tick(0)
+    t.corpse.CharacterStats.CurrentHealth=0
+    t.corpse.CharacterState=1
+    t.tick(0)
+    t.pc.LastPlayerChar=t.newPawn
+    t.newPawn.CharacterStats.CurrentHealth=120
+    t.tick(0)
+    assert(#t.audioCommands==1,
+        "client audio must work when GetPawn() is nil (live log scenario)")
+end)
+
+test("client old-pawn revive at same character path plays exactly once",function()
+    local t=fixture(false,true,true)
+    t.tick(0)
+    t.corpse.CharacterStats.CurrentHealth=0
+    t.corpse.CharacterState=1
+    t.tick(0)
+    t.corpse.CharacterState=0
+    t.corpse.CharacterStats.CurrentHealth=120
+    t.tick(0)
+    assert(#t.audioCommands==1,"existing character revive is a respawn")
+    t.tick(0)
+    assert(#t.audioCommands==1)
+end)
+
+test("client first join while dead then spawn does NOT play sound",function()
+    local t=fixture(false,true,true)
+    t.corpse.CharacterStats.CurrentHealth=0
+    t.corpse.CharacterState=1
+    t.tick(0)
+    t.pc._pawn=t.newPawn
+    t.pc.LastPlayerChar=t.newPawn
+    t.newPawn.CharacterStats.CurrentHealth=120
+    t.tick(0)
+    assert(#t.audioCommands==0,"first join must be silent")
+end)
+
+test("client never hears remote player's death/respawn",function()
+    local t=fixture(false,true,true)
+    t.tick(0)
+    local other=actor({_name="HeldenPlayerController /Game/Remote"})
+    local otherPawn=actor({_name="HeldenPlayerCharacter /Game/RemotePawn",
+        CharacterStats=actor({CurrentHealth=100,TotalStats={MaxHealth=100}})})
+    other.LastPlayerChar=otherPawn
+    function other:IsLocalController() return false end
+    function other:GetPawn() return otherPawn end
+    t.listing.HeldenPlayerController[2]=other
+    otherPawn.CharacterStats.CurrentHealth=0
+    otherPawn.CharacterState=1
+    t.tick(0)
+    otherPawn.CharacterStats.CurrentHealth=100
+    otherPawn.CharacterState=0
+    t.tick(0)
+    assert(#t.audioCommands==0,
+        "only owning client should play local audio, never other players")
+end)
+
+test("client OnNewPawn can recognize respawn before LastPlayerChar replicates",function()
+    local t=fixture(false,true,true)
+    t.tick(0)
+    t.corpse.CharacterStats.CurrentHealth=0
+    t.corpse.CharacterState=1
+    t.tick(0)
+    local h=t.hooks["/Script/Helden.HeldenPlayerController:OnNewPawn"]
+    assert(h and h.post)
+    t.newPawn.CharacterStats.CurrentHealth=120
+    h.post(t.pc,nil,t.newPawn)
+    t.tick(0)
+    assert(#t.audioCommands==1,
+        "client should use confirmed new pawn when LastPlayerChar is still dead")
+end)
+
+test("client audio does not mutate loot/respawn/money on its non-authoritative instance",function()
+    local t=fixture(false,true,true)
+    local money=t.corpse.Money.Gold
+    t.tick(0)
+    t.corpse.CharacterStats.CurrentHealth=0
+    t.corpse.CharacterState=1
+    t.tick(0)
+    t.pc._pawn=t.newPawn
+    t.pc.LastPlayerChar=t.newPawn
+    t.newPawn.CharacterStats.CurrentHealth=120
+    t.tick(0)
+    assert(#t.audioCommands==1)
+    assert(t.counts.respawn==0,"client must not call host-only respawn RPC")
+    assert(t.corpse.Money.Gold==money and t.newPawn.Money.Gold==0,
+        "client audio listener cannot change currency")
+    assert(t.newPawn.location==nil,
+        "client audio listener cannot move character or heal them")
 end)
 
 print("ALL TESTS PASSED ("..passed..")")
