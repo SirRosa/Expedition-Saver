@@ -15,6 +15,8 @@ local CFG = {
     RespawnDelaySeconds = 0.15,
     RespawnRetrySeconds = 1.5,
     MaxRespawnRequests = 3,
+    EnableExistingPawnReviveFallback = true, -- after native server respawn failed
+    FallbackAfterTicks = 15,
     BackupFile = true,
     MaxCoinsPerDrop = 100000,
     RewardDelaySeconds = 0.20,
@@ -400,7 +402,10 @@ local function monitorPlayers(ctx)
             local soul=get(pc,"SoulCharacter")
             local last=get(pc,"LastPlayerChar")
             local char
-            if valid(pawn) and valid(get(pawn,"CharacterStats")) then
+            if valid(soul) and valid(pawn) and path(soul)==path(pawn) and
+               valid(last) and valid(get(last,"CharacterStats")) then
+                char=last
+            elseif valid(pawn) and valid(get(pawn,"CharacterStats")) then
                 char=pawn
             elseif valid(last) and valid(get(last,"CharacterStats")) then
                 char=last
@@ -426,7 +431,7 @@ local function monitorPlayers(ctx)
                 tracking.alive=true
                 tracking.dead=false
                 tracking.snapshotCycle=tracking.snapshotCycle+1
-                if tracking.snapshotCycle>=4 then
+                if tracking.snapshotCycle>=4 or #tracking.gear==0 then
                     tracking.gear=gearOf(char)
                     tracking.snapshotCycle=0
                 end
@@ -532,6 +537,40 @@ local function collectAtElevator(entry,dest,pawn)
     end
 end
 
+local function reviveOldPawn(entry)
+    if not CFG.EnableExistingPawnReviveFallback then return false end
+    local char,pc=entry.oldChar,entry.controller
+    if not valid(char) or not valid(pc) then return false end
+    local at=respawnLocation()
+    if not at then
+        log("REVIVE FALLBACK: elevator location unavailable")
+        return false
+    end
+    -- A native respawn is always attempted first. After it fails, re-enable
+    -- the *existing* character (and existing inventory) rather than cloning
+    -- players or silently abandoning the expedition.
+    local write=put(char,"CharacterState",0)
+    put(char,"bCollisionAndMovementDisable",false)
+    local hp=heal(char)
+    local moved=teleport(char,at)
+    pcall(function() char:SetActorEnableCollision(true) end)
+    pcall(function() char:OnRep_CharacterState() end)
+    pcall(function() char:OnRep_bCollisionAndMovementDisable() end)
+    local possessed,why=pcall(function() pc:Possess(char) end)
+    local owns=path(currentPawn(pc))==path(char)
+    if possessed and owns then
+        pcall(function() pc:ClientRestart(char) end)
+    end
+    log("REVIVE FALLBACK stateSet="..tostring(write)..
+        " healed="..tostring(hp).." moved="..tostring(moved)..
+        " possess="..tostring(possessed).." owned="..tostring(owns)..
+        (possessed and "" or " error="..tostring(why)))
+    if write and hp and moved and owns then
+        collectAtElevator(entry,at,char)
+        return true
+    end
+    return false
+end
 local function processDeaths(ctx)
     if not CFG.EnableRespawn then return end
     for key,entry in pairs(S.pending) do
@@ -560,8 +599,17 @@ local function processDeaths(ctx)
                 local ok,err=pcall(function()
                     entry.controller:RespawnCharacter_Server()
                 end)
-                log("respawn request "..entry.attempts.." -> "..tostring(ok)..
+                log("NATIVE RESPAWN request "..entry.attempts.." -> "..tostring(ok)..
                     (ok and "" or (": "..tostring(err))))
+            elseif entry.attempts>=CFG.MaxRespawnRequests and
+                   entry.ageTicks>=CFG.FallbackAfterTicks and
+                   not entry.fallbackDone then
+                entry.fallbackDone=true
+                if reviveOldPawn(entry) then
+                    log("REVIVE FALLBACK succeeded, recovered existing player pawn")
+                    S.pending[key]=nil
+                    S.respawned=S.respawned+1
+                end
             end
         end
     end
