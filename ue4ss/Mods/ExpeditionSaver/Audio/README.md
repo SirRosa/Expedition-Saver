@@ -1,15 +1,30 @@
-# Respawn sound — v0.7.6 host + client
+# Respawn audio v0.7.7 — instant, invisible, host + client
 
-- The **exact WAV supplied by the user** (`re-zero-return-by-death (1).wav`, 1.886 seconds, 44.1 kHz, 16-bit stereo) replaces the old 2.7-second sound in the downloadable installer. The user's audio asset is not committed to the public GitHub repo; install the complete ZIP.
-- `respawn_audio.cpp` is the complete source for the small Windows WinMM `PlaySoundW` helper. The GitHub Actions Windows job builds `respawn_audio.exe` for x64. Both that EXE and `respawn.wav` are included in the finished installation ZIP.
-- **Install the same ExpeditionSaver mod folder, including the Audio subfolder, on BOTH the host PC and each client PC.** The host retains authoritative respawn/rewards; on clients the audio listener is read-only and does not perform any gameplay mutation.
-- **Host:** plays exactly once on confirmed successful native respawn or existing-pawn revive fallback. Only for the host's local controller.
-- **Client:** watches **only the local controller** for a real living→dead→living transition, including `LastPlayerChar` when `GetPawn()` is nil, same-character revival, and `OnNewPawn` arriving before replicated `LastPlayerChar`. It does not need a server RPC or a server-side audio broadcast.
-- Sound is **not** played on initial spawn, while dead, on simple respawn requests, or on remote players' respawns. There is no duplicate playback on the host; the client listener runs only without a live authoritative GameMode.
-- The sound runs via UE4SS `ExecuteAsync` in a separate source-auditable Windows process (WinMM), not the Unreal game thread. It plays through the **local default Windows output device**, independent of the game's internal volume controls.
-- Config: `EnableRespawnSound = true` in `Scripts/main.lua`. Set `false` to disable. Missing helper/audio/API simply skips playback.
-- GitHub Actions uses mocked UE4SS client and server events (including nil `GetPawn()`) and compiles the Win64 helper. **Actual in-game client and host audio still requires verification on two PCs.**
+The exact user-provided **re-zero-return-by-death (1).wav** (1.886 s, PCM 44.1 kHz stereo) is included as `respawn.wav` **only in the chat installation ZIP**. It is not committed to this public repository.
 
-**Installation:** extract the complete ZIP to `Grain Rot/Helden/Binaries/Win64/` on EACH PC, preserving `ue4ss/Mods/ExpeditionSaver/Audio/`.
+## Why we removed the EXE
 
-**Important:** GitHub's code-only Actions artifact does not include the uploaded sound. The complete downloadable installation ZIP supplied in chat includes the correct new WAV and the compiled helper.
+v0.7.5–v0.7.6 mistakenly used `os.execute()` to launch a Win32 EXE. Lua invokes `cmd.exe`, making a visible console window and introducing process-launch latency. This was unsuitable for a game.
+
+v0.7.7 ships a small **in-process Windows DLL**:
+- `respawn_audio.cpp` is its complete auditable source.
+- `respawn_audio.dll` is compiled in GitHub Actions x64, copied into the final installation ZIP.
+- `Scripts/main.lua` uses Lua's `package.loadlib(path, "luaopen_RespawnSound")` to load it **once at mod startup**.
+- The exported Lua C function ignores its Lua argument, needs no Lua runtime exports, and calls native `PlaySoundW(... SND_FILENAME | SND_NODEFAULT | SND_ASYNC)`, which **returns without waiting for the WAV to finish**.
+- **No shell, CMD, subprocess, EXE, PowerShell, busy-loop or sleep.** Audio is played through Windows' default sound device; game audio-volume settings do not control it.
+
+Host: played once on successful server-side respawn or verified fallback revive. Client: the local-only observer triggers after witnessed death on `OnNewPawn`, replicated `CharacterState` revival or its periodic fallback. Not for initial join or remote players.
+
+## Installation
+
+Extract the user-specific ZIP to `Grain Rot/Helden/Binaries/Win64/` on **both host and each client**. The files must be adjacent in `ue4ss/Mods/ExpeditionSaver/Audio/`:
+
+- `respawn_audio.dll`
+- `respawn.wav`
+- (optional/auditable) `respawn_audio.cpp`
+
+`respawn_audio.exe` from older versions is obsolete and can be deleted. It is **not included or invoked** by v0.7.7.
+
+Enable/disable via `EnableRespawnSound = true/false` in `Scripts/main.lua`. If `package.loadlib` or the DLL is unavailable, audio is silently skipped with one error log; respawn and currency logic continue.
+
+CI performs Lua 5.4 mock regression tests and compiles/smoke-tests the DLL on Windows x64. **Actual in-game audible playback and host/client synchronization still require verification on two real PCs.**
