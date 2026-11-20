@@ -1,5 +1,28 @@
 # Grain Rot — Expedition Saver
 
+## v0.7.0 — Story + Expedition death/rewards (TEST BUILD)
+
+**This build handles Story (EHeldenGameMode.Default=0) AND Expedition (1).**
+- Shared native `RespawnCharacter_Server`, gear restoration and wallet recovery in BOTH modes.
+- Expedition still restores depth and unlocks its failure/elevator objects; these save mutations do **not** run in Story.
+- In Story without a DungeonElevator, native spawn location is preserved; if reviving the old pawn, use a PlayerStart or last known alive position.
+- Destroying furniture/physical treasure uses the same XP-multiplied/QOL table reward in Story, and credits Gold/Artifacts directly when the recipient is known.
+- In multiplayer, the recipient can be identified by native damage overlap, projectile damage, a recent `HeldenWeapon:Attack_Server`, or a unique melee-range player. Never pay two players or blindly assign an unresolved reward: fall back to the original physical Gold/Artifacts actor, with diagnostic `reason=unverified-coop` or `multiple-attackers`.
+- **Death duplication:** after restoring the wallet, scan only *new, very recent, nearby* `HeldenPhysicsCoin` actors from the death area, verify the coin's value is within the missing-drop budget, zero its `Money` and destroy the actor. Unlike v0.5.1, the currency drop need NOT match the exact entire Gold/Artifacts/Scraps wallet; partial drop is supported.
+- Never delete or alter `HeldenEquipableItem`, equipment actors, older floor coins, coins in other maps, or money before a safe wallet check. An unknown origin is inherently ambiguous; inspect log if some coins remain.
+
+**Acceptance test (host + client):**
+1. Back up save; replace previous ExpeditionSaver and QOL versions.
+2. Story: destroy a furniture item, check gold/tokens instantly and normal native scrap behavior; die, respawn, verify all gear and money.
+3. Expedition: repeat with both players close to the same furniture and test a confirmed hammer hit.
+4. After death check original site for duplicated currency and logs: `PLAYER DEATH queued`, `MONEY RESTORE`, `DEATH COINS REMOVED`/`DEATH COINS RESULT`, `DIRECT REWARD`, `DROP ... reason=`.
+5. Watch `PERF slow Expedition poll` events to correlate stalls. All CI tests are mocked UE4SS and cannot confirm runtime replication/FPS.
+
+**Test branch:** `fix/story-respawn-rewards-and-death-dup-v07`; separate from main.
+
+---
+
+
 ## v0.6.0 — experimental direct reward and stutter reduction
 
 - When furniture or dungeon treasure is destroyed, credits its Gold / Artifact Coins directly to the verified player wallet, without spawning physics coin actors.
