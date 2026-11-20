@@ -208,6 +208,7 @@ local S={
     deathEvents=0,newPawnEvents=0,rewardEvents=0,rawDeathEvents=0,rawDestroyEvents=0,heartbeatTicks=1000,machineRepairCycle=1000,
     players={},recoveries={},observedDeaths=0,failedBarriers=0,coinsLocated=0,
     unresolvedTreasureLogs=0,
+    damageHits={},pollCycle=0,
     coinBaseline={},coinBaselineCycle=0,currencyCleanup={},
     failureChecks=0
 }
@@ -270,6 +271,7 @@ local function resetForSave(ctx,key,slot)
     S.recoveries=preserve and oldRecoveries or {}
     S.currencyCleanup=preserve and oldCurrencyCleanup or {}
     S.coinBaseline={};S.coinBaselineCycle=0
+    S.damageHits={};S.pollCycle=0
     S.nextBackupDepth=-1
     S.dropQueue={};S.destructionSeen={}
     S.nextMachineRepair=0;S.machineRepairAttempts=0
@@ -1128,14 +1130,57 @@ local function lootValue(actor)
     end
     return inspectedZero
 end
--- Death/physics hooks do not expose a damage instigator. Credit a wallet
--- only for a controller explicitly referenced by the actor OR when there is
--- exactly one eligible player. Never guess by proximity in multiplayer.
+-- The destroyed actor's GetInstigatorController() describes the actor's
+-- OWN creation context, not necessarily the attacking player. Never credit
+-- it as damage evidence. Track actual active damage overlaps and projectile
+-- damage instead, matching player-controlled attack owners to the target.
+local function ownerController(source)
+    source=unwrap(source)
+    if not valid(source) then return nil end
+    local ids={}
+    local obj=source
+    for _=1,4 do
+        if not valid(obj) then break end
+        local id=path(obj)
+        if not id or ids[id] then break end
+        ids[id]=true
+        local previous=get(obj,"PreviousOwner")
+        local nextObj
+        if valid(previous) then nextObj=previous
+        else pcall(function() nextObj=obj:GetOwner() end) end
+        obj=nextObj
+    end
+    local pcList=all("HeldenPlayerController")
+    for _,pc in ipairs(pcList) do
+        if valid(pc) then
+            local pawn=currentPawn(pc)
+            if valid(pawn) and ids[path(pawn)] then return pc end
+        end
+    end
+    return nil
+end
+
+local function recordDamage(target,pc,kind)
+    if S.phase~=2 or not valid(target) or not valid(pc) or
+       not valid(get(target,"StatsComponent")) then return end
+    local key,player=path(target),path(pc)
+    if not key or not player then return end
+    local prev=S.damageHits[key]
+    if prev and S.pollCycle-prev.tick<=2 and
+       prev.player~=player then
+        prev.ambiguous=true
+        prev.tick=S.pollCycle
+    else
+        S.damageHits[key]={player=player,tick=S.pollCycle,kind=kind,
+            ambiguous=prev and prev.ambiguous or false}
+    end
+end
+
 local function selectDestroyer(actor)
     if not CFG.DirectFurnitureRewards then return nil,"disabled" end
-    local instigator
-    pcall(function() instigator=actor:GetInstigatorController() end)
-    local instigatorId=valid(instigator) and path(instigator) or nil
+    local key=path(actor)
+    local hit=key and S.damageHits[key] or nil
+    local recent=hit and S.pollCycle-hit.tick<=2
     local sole,chosen,count=nil,nil,0
     for _,pc in ipairs(all("HeldenPlayerController")) do
         if valid(pc) then
@@ -1143,13 +1188,15 @@ local function selectDestroyer(actor)
             if valid(pawn) and get(pawn,"Money") then
                 count=count+1
                 if count==1 then sole=pawn end
-                if instigatorId and path(pc)==instigatorId then chosen=pawn end
+                if recent and not hit.ambiguous and path(pc)==hit.player then
+                    chosen=pawn
+                end
             end
         end
     end
-    if valid(chosen) then return chosen,"instigator" end
+    if valid(chosen) then return chosen,"verified-"..hit.kind end
     if count==1 and valid(sole) then return sole,"single-player" end
-    return nil,count>1 and "ambiguous-coop" or "no-owner"
+    return nil,count>1 and "unverified-coop" or "no-owner"
 end
 
 local function creditReward(pawn,currency,amount)
@@ -1527,6 +1574,12 @@ local function repairElevator(ctx)
 end
 
 local function poll()
+    S.pollCycle=S.pollCycle+1
+    if S.pollCycle%20==0 then
+        for key,hit in pairs(S.damageHits) do
+            if S.pollCycle-hit.tick>3 then S.damageHits[key]=nil end
+        end
+    end
     local now=os.clock()
     local host=onHost()
     local ctx=host and game()
@@ -1737,6 +1790,30 @@ if CFG.EnableNoPermadeath then
             if not ctx or (ctx.phase~=0 and ctx.phase~=3) then return end
             local machine=first("HeldenElevatorMachine")
             if valid(machine) and path(machine)==path(unwrap(context)) then return true end
+        end))
+end
+-- Damage ownership hooks are event-driven, not per animation frame.
+-- These reflected callbacks carry the actual target actor.
+if CFG.DirectFurnitureRewards then
+    hook("/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin",
+        safePre("damage overlap",function(component,overlap,otherActor)
+            local box=unwrap(component)
+            if S.phase~=2 or not valid(box) or
+               get(box,"bDamageActive")~=true then return end
+            local source
+            pcall(function() source=box:GetOwner() end)
+            recordDamage(unwrap(otherActor),ownerController(source),"active-melee-overlap")
+        end))
+    hook("/Script/Helden.HeldenProjectile:OnDamagedActor",
+        safePre("projectile hit",function(projectile,overlap,otherActor)
+            if S.phase~=2 then return end
+            local source=unwrap(projectile)
+            local pc
+            if valid(source) then
+                pcall(function() pc=source:GetInstigatorController() end)
+            end
+            if not valid(pc) then pc=ownerController(source) end
+            recordDamage(unwrap(otherActor),pc,"projectile-hit")
         end))
 end
 -- Capture the destruction signal from the engine, not keyboard actions.
