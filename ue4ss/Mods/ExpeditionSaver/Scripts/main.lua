@@ -1135,14 +1135,16 @@ local function processInventoryRecoveries()
     end
 end
 
--- Audio is deliberately outside Unreal's game thread and does not use
--- UObject/USoundBase APIs. Install the user's NEW 44.1kHz PCM WAV unchanged.
--- UE4SS does not natively import arbitrary audio as a cooked USoundBase.
--- Tiny, source-auditable helper: Audio/respawn_audio.exe (WinMM PlaySoundW).
--- Both files must be installed. Missing files fail open without affecting
--- respawn, item recovery, currency or game performance.
+-- Direct WinMM sound playback: NO cmd.exe, os.execute, child EXE or
+-- blocking audio. UE4SS supports Lua C libraries through package.loadlib.
+-- Its native luaopen_RespawnSound function uses PlaySoundW(SND_ASYNC).
+-- The DLL lives next to the supplied respawn.wav. The sound is local to the
+-- player's own PC; clients observe their own resurrection independently.
 local respawnAudioRoot=nil
+local respawnAudioLoadAttempted=false
+local respawnAudioFunction=nil
 local respawnAudioMissingLogged=false
+
 local function audioFolder()
     if respawnAudioRoot then return respawnAudioRoot end
     local dirs={}
@@ -1155,55 +1157,62 @@ local function audioFolder()
     dirs[#dirs+1]="Mods/ExpeditionSaver/Audio/"
     dirs[#dirs+1]="ue4ss/Mods/ExpeditionSaver/Audio/"
     local function exists(path)
-        local ok,h=pcall(function() return io.open(path,"rb") end)
-        if ok and h then pcall(function() h:close() end);return true end
+        local good,h=pcall(function() return io.open(path,"rb") end)
+        if good and h then pcall(function() h:close() end);return true end
         return false
     end
     for _,dir in ipairs(dirs) do
-        if exists(dir.."respawn_audio.exe") and exists(dir.."respawn.wav") then
+        if exists(dir.."respawn_audio.dll") and exists(dir.."respawn.wav") then
             respawnAudioRoot=dir
             return dir
         end
     end
     return nil
 end
-local function playRespawnSound(pc)
-    if not CFG.EnableRespawnSound then return end
-    -- Every game instance plays only for its own locally controlled player.
-    -- A client installation detects client respawns independently of host
-    -- authority and never plays the host's or another client's events.
-    if valid(pc) then
-        local ok,isLocal=pcall(function() return pc:IsLocalController() end)
-        if not ok or isLocal~=true then return end
-    end
-    if type(ExecuteAsync)~="function" or type(os.execute)~="function" then
-        if not respawnAudioMissingLogged then
-            respawnAudioMissingLogged=true
-            log("RESPAWN SOUND unavailable: UE4SS ExecuteAsync/os.execute missing")
-        end
-        return
-    end
+
+local function loadRespawnSound()
+    if respawnAudioLoadAttempted then return respawnAudioFunction end
+    respawnAudioLoadAttempted=true
     local dir=audioFolder()
     if not dir then
         if not respawnAudioMissingLogged then
             respawnAudioMissingLogged=true
-            log("RESPAWN SOUND missing Audio/respawn.wav or respawn_audio.exe")
+            log("RESPAWN SOUND missing Audio/respawn_audio.dll or respawn.wav")
         end
-        return
+        return nil
     end
-    local exe=dir.."respawn_audio.exe"
-    local wav=dir.."respawn.wav"
-    -- Each path is double-quoted and the whole command is protected for
-    -- cmd.exe /c (works with Steam libraries containing whitespace).
-    if exe:find('"',1,true) or wav:find('"',1,true) then return end
-    local command='""'..exe..'" "'..wav..'""'
-    local ok,err=pcall(function()
-        ExecuteAsync(function()
-            local ran,why=pcall(os.execute,command)
-            if not ran then log("RESPAWN SOUND process error: "..tostring(why)) end
-        end)
-    end)
-    if not ok then log("RESPAWN SOUND async dispatch failed: "..tostring(err)) end
+    if type(package)~="table" or type(package.loadlib)~="function" then
+        log("RESPAWN SOUND native DLL loading unavailable: package.loadlib missing")
+        return nil
+    end
+    -- Exact known DLL in the mod directory. Loaded only once, not once per
+    -- death. No Windows command interpreter is involved.
+    local ok,fn,why=pcall(package.loadlib,
+        dir.."respawn_audio.dll","luaopen_RespawnSound")
+    if ok and type(fn)=="function" then
+        respawnAudioFunction=fn
+        log("RESPAWN SOUND native WinMM player loaded (no CMD)")
+    else
+        log("RESPAWN SOUND native WinMM DLL load failed: "..
+            tostring(why or fn))
+    end
+    return respawnAudioFunction
+end
+
+local function playRespawnSound(pc)
+    if not CFG.EnableRespawnSound then return end
+    -- Strictly local: never play a client's sound on the host PC.
+    if not valid(pc) then return end
+    local ok,localPc=pcall(function() return pc:IsLocalController() end)
+    if not ok or localPc~=true then return end
+    local fn=loadRespawnSound()
+    if not fn then return end
+    -- PlaySoundW is SND_ASYNC: one fast native function call, playback
+    -- starts directly without shell startup, console or thread sleeps.
+    local success,why=pcall(fn)
+    if not success then
+        log("RESPAWN SOUND WinMM callback failed: "..tostring(why))
+    end
 end
 
 -- Local client-side witness for the death -> successful respawn transition.
@@ -2482,4 +2491,4 @@ hook("/Script/Engine.PlayerController:ClientRestart",
          S.coinLedger={}
          S.dropQueue={};S.destructionSeen={}
      end)
-log("v0.7.6 LIVE-LOG FIX + host and client self-respawn WAV (async WinMM)")
+log("v0.7.7 in-process WinMM audio: no CMD, host+client local respawn")
