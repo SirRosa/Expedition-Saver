@@ -15,11 +15,12 @@ local CFG = {
     EnableMoneyRecovery = true,
     CleanupNativeDeathCoins = true, -- strictly proven currency drops, NEVER equipment
     DeathCoinRadius = 240, -- centimeters
-    DeathCoinMaxAgeSeconds = 12,
-    DeathCoinScanTicks = 40, -- 12 seconds on the 300ms engine timer
+    DeathCoinMaxAgeSeconds = 30,
+    DeathCoinScanTicks = 100, -- watch currency drops for 30 seconds
     EnableNoPermadeath = true,
     EnablePhysicalCoins = true,
-    DirectFurnitureRewards = true, -- wallet credit to proven destroyer
+    DirectFurnitureRewards = true, -- wallet credit to verified or uniquely close destroyer
+    RewardNearbyPlayerRadius = 280, -- 2.8 m, solo melee reach only
     SlowPollWarnSeconds = 0.035,
     CoinBaselineEveryPolls = 4, -- preserve strict pre-death baseline for anti-duplication
     RespawnDelaySeconds = 0.15,
@@ -87,6 +88,7 @@ local function enum(v)
     local n=tonumber(s)
     if n then return n end
     if s:find("Expedition",1,true) then return 1 end
+    if s:find("Story",1,true) then return 0 end
     if s:find("Exploring",1,true) then return 2 end
     if s:find("EndScreen",1,true) then return 3 end
     if s:find("ElevatorRideDown",1,true) then return 1 end
@@ -168,31 +170,45 @@ end
 local function onHost()
     return valid(first("HeldenGameMode")) or valid(first("GameModeBase"))
 end
+-- Both modes use the same HeldenPlayerController / Character APIs.
+-- EHeldenGameMode.Default=0 (Story), Expedition=1. Story may not have an
+-- active CurrentDungeonRun, so only Expedition mechanics require that struct.
 local function game()
     local gi=first("HeldenGameInstance")
     local gs=first("HeldenGameState")
     local save=gi and get(gi,"CurrentSaveGame")
     if not valid(gs) or not valid(save) then return nil end
-    -- Do not touch the normal game. GameModeType is the authoritative check.
     local gm=enum(get(gs,"GameModeType"))
     local sg=enum(get(save,"GameMode"))
     local metadataMode=enum(get(get(save,"MetaData"),"GameMode"))
-    -- Some transitions leave GameState.GameModeType unset while the
-    -- underlying SaveGame still identifies a valid Expedition. Require two
-    -- independent saved indicators if the live GameState disagrees.
-    if gm~=1 and (sg==1 or metadataMode==1) then
-        -- FindFirstOf may point to a stale GameState from the menu or prior
-        -- level. Prefer an actually live Expedition state when one exists.
+    local function modeKnown(n) return n==0 or n==1 end
+    if not modeKnown(sg) and not modeKnown(metadataMode) and
+       not modeKnown(gm) then return nil end
+    -- During transitions, the saved mode may be ahead of a stale GameState.
+    -- Require agreement between both persisted values before overriding it.
+    if modeKnown(sg) and modeKnown(metadataMode) and
+       sg~=metadataMode then return nil end
+    local expected
+    if modeKnown(sg) and sg==metadataMode then expected=sg
+    elseif modeKnown(sg) and gm==sg then expected=sg
+    elseif modeKnown(metadataMode) and gm==metadataMode then
+        expected=metadataMode
+    elseif modeKnown(gm) then expected=gm
+    end
+    if not modeKnown(expected) then return nil end
+    if gm~=expected then
         for _,candidate in ipairs(all("HeldenGameState")) do
-            if valid(candidate) and enum(get(candidate,"GameModeType"))==1 then
-                gs=candidate;cache.HeldenGameState=candidate;gm=1;break
+            if valid(candidate) and enum(get(candidate,"GameModeType"))==expected then
+                gs=candidate;cache.HeldenGameState=candidate;gm=expected;break
             end
         end
+        if gm~=expected and not
+           (sg==expected and metadataMode==expected) then return nil end
     end
-    if gm~=1 and not (sg==1 and metadataMode==1) then return nil end
     local run=get(gs,"CurrentDungeonRun")
-    if not run then return nil end
+    if expected==1 and not run then return nil end
     return {gi=gi,gs=gs,save=save,run=run,
+        mode=expected,isStory=expected==0,isExpedition=expected==1,
         phase=enum(get(run,"State")) or 0,
         failed=failure(get(run,"Flags"))}
 end
@@ -210,8 +226,14 @@ local S={
     unresolvedTreasureLogs=0,
     damageHits={},pollCycle=0,gearScanTick=-1,gearScanObjects={},
     coinBaseline={},coinBaselineCycle=0,currencyCleanup={},
-    failureChecks=0
+    failureChecks=0,
+    mode=nil
 }
+local function deathAllowed(ctx)
+    return ctx~=nil and
+        (ctx.isStory or (ctx.isExpedition and
+            (ctx.phase==2 or (ctx.phase==3 and (S.active or ctx.failed)))))
+end
 local function backupFile(slot)
     if not CFG.BackupFile then return nil end
     local base
@@ -256,7 +278,8 @@ local function resetForSave(ctx,key,slot)
     local oldPlayers=S.players
     local oldRecoveries=S.recoveries
     local oldCurrencyCleanup=S.currencyCleanup
-    local preserve=oldSlot==slot and (S.recoveryRequired or S.active or next(oldPending)~=nil)
+    local preserve=oldSlot==slot and S.mode==ctx.mode and
+        (S.recoveryRequired or S.active or next(oldPending)~=nil)
     local oldDepth,oldSeed,oldOffset,oldActive,oldFailed=
         S.depth,S.highestSeed,S.offset,S.active,S.failed
     S.slot=slot;S.saveKey=key
@@ -278,13 +301,16 @@ local function resetForSave(ctx,key,slot)
     S.nextMachineRepair=0;S.machineRepairAttempts=0
     local time=number(get(ctx.save,"TimePlayed"),0,1000000000)
     local fails=number(get(ctx.save,"DungeonFails"),0,1000000000)
-    local recovered=readBackup(slot,time,fails)
-    if recovered and recovered>S.depth then S.depth=recovered end
-    log("Expedition slot "..slot.." loaded; protected depth "..S.depth..
+    if ctx.isExpedition then
+        local recovered=readBackup(slot,time,fails)
+        if recovered and recovered>S.depth then S.depth=recovered end
+    end
+    log((ctx.isStory and "Story" or "Expedition").." slot "..slot..
+        " loaded; protected depth "..S.depth..
         " retainedRunState="..tostring(preserve))
 end
 local function keepExpedition(ctx)
-    if not CFG.EnableNoPermadeath then return end
+    if not ctx.isExpedition or not CFG.EnableNoPermadeath then return end
     -- EndScreen+Failed is sufficient even when no previous Exploring poll ran.
     if ctx.phase==3 and ctx.failed then
         if not S.recoveryRequired then log("RECOVERY detected directly from EndScreen/Failed") end
