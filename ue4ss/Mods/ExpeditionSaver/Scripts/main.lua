@@ -563,6 +563,70 @@ local function processDropQueue()
     end
 end
 
+-- Game preserves an EndScreen/Failed state after the final death. Updating
+-- DungeonLevel alone does NOT unlock the machine; repair the run AND its
+-- interaction gate only after the elevator is back at the home station.
+local function repairElevator(ctx)
+    if not CFG.EnableNoPermadeath or not S.recoveryRequired then return end
+    if ctx.phase==1 or ctx.phase==2 then return end
+    local now=os.clock()
+    if now<S.nextMachineRepair or S.machineRepairAttempts>=10 then return end
+    S.nextMachineRepair=now+CFG.RecoveryRetrySeconds
+    S.machineRepairAttempts=S.machineRepairAttempts+1
+    local lift=first("HeldenDungeonElevator")
+    local machine=first("HeldenElevatorMachine")
+    if valid(lift) then
+        local home=number(get(lift,"HomeStationIdx"),0,256)
+        local station=number(get(lift,"CurrentStationIdx"),0,256)
+        if home~=nil and station~=nil and home~=station then
+            log("RECOVERY waiting for elevator at home; station="..station.." home="..home)
+            return
+        end
+    elseif ctx.phase~=0 then
+        log("RECOVERY waiting for home elevator (run="..ctx.phase..")")
+        return
+    end
+    local run=get(ctx.gs,"CurrentDungeonRun")
+    local before=enum(get(run,"State"))
+    local flagsBefore=enum(get(run,"Flags"))
+    local changed=true
+    if before==3 then changed=put(run,"State",0) end
+    if get(run,"Flags")~=nil then put(run,"Flags",0) end
+    -- A reflected UStruct might be copy-on-read. Write it back to its
+    -- GameState owner and verify that the actual source changed.
+    if before==3 and enum(get(get(ctx.gs,"CurrentDungeonRun"),"State"))~=0 then
+        put(ctx.gs,"CurrentDungeonRun",run)
+    end
+    local after=enum(get(get(ctx.gs,"CurrentDungeonRun"),"State"))
+    local clear=after==0
+    local interaction="not found"
+    if valid(machine) then
+        if get(machine,"bInteractionLocked")==true then
+            put(machine,"bInteractionLocked",false)
+        end
+        local ok,why=pcall(function() machine:SetCanBeInteracted_Auth(true) end)
+        if ok then interaction="unlocked" else interaction="error:"..tostring(why) end
+        pcall(function() machine:OnRequirementSysUpdate_Auth() end)
+        -- Recompute native elevator-button state using the restored run.
+        if clear then
+            pcall(function() machine:OnDungeonRunStateChanged(get(ctx.gs,"CurrentDungeonRun")) end)
+        end
+    end
+    if valid(lift) and get(lift,"bInteractionLocked")==true then
+        put(lift,"bInteractionLocked",false)
+    end
+    if clear then
+        pcall(function() ctx.gs:OnRep_DungeonRunState() end)
+    end
+    log("RECOVERY run="..tostring(before).." -> "..tostring(after)..
+        " flags="..tostring(flagsBefore).." -> "..
+        tostring(enum(get(get(ctx.gs,"CurrentDungeonRun"),"Flags")))..
+        " machine="..interaction.." attempt="..S.machineRepairAttempts)
+    if after~=0 and S.machineRepairAttempts==10 then
+        log("WARNING: cannot reset ended run; elevator may stay locked")
+    end
+end
+
 local function poll()
     local now=os.clock()
     local host=onHost()
@@ -594,6 +658,7 @@ local function poll()
     if S.slot~=slot or S.saveKey~=key then resetForSave(ctx,key,slot) end
     keepExpedition(ctx)
     processDeaths(ctx)
+    repairElevator(ctx)
     processDropQueue()
     if ctx.phase==1 or ctx.phase==2 then
         if S.phase==0 or S.phase==3 then
