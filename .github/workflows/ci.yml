@@ -2,7 +2,7 @@ name: Expedition Saver — validate, test and package
 
 on:
   push:
-    branches: [main, fix/death-currency-duplication, feature/direct-rewards-performance, fix/story-respawn-rewards-and-death-dup-v07, fix/nearest-recipient-no-physical-rewards, fix/story-loot-stutter-v072, fix/story-currency-event-perf-v073, fix/live-log-lastplayerchar-rewards-v074]
+    branches: [main, fix/death-currency-duplication, feature/direct-rewards-performance, fix/story-respawn-rewards-and-death-dup-v07, fix/nearest-recipient-no-physical-rewards, fix/story-loot-stutter-v072, fix/story-currency-event-perf-v073, fix/live-log-lastplayerchar-rewards-v074, feature/respawn-audio-v075]
   pull_request:
   workflow_dispatch:
 
@@ -33,11 +33,36 @@ jobs:
           mkdir -p out
           zip -r out/ExpeditionMapper-v0.1.0.zip ue4ss/Mods/ExpeditionMapper/
           unzip -t out/ExpeditionMapper-v0.1.0.zip
-          zip -r out/ExpeditionSaver-v0.7.4-lastplayerchar-live-log-test.zip ue4ss/Mods/ExpeditionSaver/
-          unzip -t out/ExpeditionSaver-v0.7.4-lastplayerchar-live-log-test.zip
+          zip -r out/ExpeditionSaver-v0.7.5-respawn-audio-test.zip ue4ss/Mods/ExpeditionSaver/
+          unzip -t out/ExpeditionSaver-v0.7.5-respawn-audio-test.zip
       - name: Publish install ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: ExpeditionSaver-v0.7.4-lastplayerchar-live-log-test
-          path: out/ExpeditionSaver-v0.7.4-lastplayerchar-live-log-test.zip
+          name: ExpeditionSaver-v0.7.5-respawn-audio-test
+          path: out/ExpeditionSaver-v0.7.5-respawn-audio-test.zip
+          if-no-files-found: error
+
+  build-win64-respawn-audio:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare MSVC x64 compiler
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Build minimal windowless WinMM player
+        shell: cmd
+        run: |
+          cl /nologo /O2 /W4 /MT /EHsc /DUNICODE /D_UNICODE /Fe:respawn_audio.exe ue4ss\\Mods\\ExpeditionSaver\\Audio\\respawn_audio.cpp /link /SUBSYSTEM:WINDOWS winmm.lib shell32.lib
+          if errorlevel 1 exit /b 1
+          if not exist respawn_audio.exe exit /b 1
+      - name: Verify audio helper exists
+        shell: pwsh
+        run: |
+          $file = Get-Item "respawn_audio.exe"
+          if ($file.Length -lt 4096 -or $file.Length -gt 1000000) { throw "Unexpected Win64 helper size" }
+          Write-Host ("RespawnAudio Win64 built: {0} bytes" -f $file.Length)
+      - name: Publish Win64 WAV player
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExpeditionSaver-v0.7.5-RespawnAudio-Win64
+          path: respawn_audio.exe
           if-no-files-found: error
