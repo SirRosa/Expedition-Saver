@@ -553,6 +553,10 @@ local function reviveOldPawn(entry)
     put(char,"bCollisionAndMovementDisable",false)
     local hp=heal(char)
     local moved=teleport(char,at)
+    if not write or not hp or not moved then
+        log("REVIVE FALLBACK skipped possession: state/health/teleport verification failed")
+        return false
+    end
     pcall(function() char:SetActorEnableCollision(true) end)
     pcall(function() char:OnRep_CharacterState() end)
     pcall(function() char:OnRep_bCollisionAndMovementDisable() end)
@@ -583,7 +587,10 @@ local function processDeaths(ctx)
         else
             local pawn=currentPawn(entry.controller)
             if entry.spawned and valid(entry.spawned) then pawn=entry.spawned end
-            if pawn and path(pawn)~=path(entry.oldChar) and valid(get(pawn,"CharacterStats")) then
+            local soul=get(entry.controller,"SoulCharacter")
+            local isSoul=valid(soul) and valid(pawn) and path(soul)==path(pawn)
+            if pawn and not isSoul and path(pawn)~=path(entry.oldChar) and
+               valid(get(pawn,"CharacterStats")) then
                 local at=respawnLocation()
                 if at and teleport(pawn,at) then
                     local healed=heal(pawn)
@@ -910,9 +917,17 @@ local function repairFailedDoor(ctx)
                 end
             end
             if S.failedBarriers<5 then
+                local boxCollision
+                local lockVisibility
+                local c=get(barrier,"Box")
+                local lock=get(barrier,"SM_SM_Door_Lock")
+                if valid(c) then pcall(function() boxCollision=c:GetCollisionEnabled() end) end
+                if valid(lock) then pcall(function() lockVisibility=lock:IsVisible() end) end
                 log("FAILURE DOOR disabled actor="..key..
                     " wasFailed="..tostring(failed)..
-                    " nowFailed="..tostring(get(barrier,"bFailedExpedition")))
+                    " nowFailed="..tostring(get(barrier,"bFailedExpedition"))..
+                    " boxCollision="..tostring(boxCollision)..
+                    " lockVisible="..tostring(lockVisibility))
                 S.failedBarriers=S.failedBarriers+1
             end
         end
@@ -963,6 +978,10 @@ local function repairElevator(ctx)
         if get(machine,"bInteractionLocked")==true then
             put(machine,"bInteractionLocked",false)
         end
+        -- The machine has a second, independent requirement gate.
+        if get(machine,"bUseInteractRequirement")==true then
+            put(machine,"bUseInteractRequirement",false)
+        end
         local ok,why=pcall(function() machine:SetCanBeInteracted_Auth(true) end)
         if ok then interaction="unlocked" else interaction="error:"..tostring(why) end
         pcall(function() machine:OnRequirementSysUpdate_Auth() end)
@@ -970,6 +989,9 @@ local function repairElevator(ctx)
         if clear then
             pcall(function() machine:OnDungeonRunStateChanged(get(ctx.gs,"CurrentDungeonRun")) end)
         end
+        -- Blueprint recomputation can reinstate these gate fields.
+        put(machine,"bInteractionLocked",false)
+        put(machine,"bUseInteractRequirement",false)
     end
     if valid(lift) and get(lift,"bInteractionLocked")==true then
         put(lift,"bInteractionLocked",false)
