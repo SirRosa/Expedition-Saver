@@ -1225,6 +1225,40 @@ local function lootValue(actor)
             " candidates="..table.concat(names,",")..
             " inspect="..tostring(inspectedZero~=nil))
     end
+    -- Story furniture uses HeldenTrashConstruct.RandomMoneySpawn
+    -- (HeldenMoneyResource {Type,Amount}) as its native money source.
+    -- The dungeon-only inspect Value and scrap data rows can be zero even
+    -- though this actor is configured to drop a currency on destruction.
+    -- Respect its native chance; never invent Gold or Artifacts for items
+    -- configured to drop only Scraps.
+    if S.mode==0 then
+        local native=get(actor,"RandomMoneySpawn")
+        local kind=enum(get(native,"Type")) -- EHeldenResource: 0 Scrap,1 Gold,2 Artifacts
+        local amount=number(get(native,"Amount"),0,CFG.MaxCoinsPerDrop)
+        local chance=tonumber(get(actor,"MoneySpawnChance"))
+        local canLoot=get(actor,"bCanSpawnLoot")
+        if canLoot~=false and amount and amount>0 and
+            (kind==1 or kind==2) and chance and chance>0 then
+            local probability=chance>1 and chance/100 or chance
+            probability=math.min(1,probability)
+            if probability>=1 or math.random()<probability then
+                return {gold=kind==1 and amount or 0,
+                    artifacts=kind==2 and amount or 0,
+                    source="story-trash-native-money-resource"}
+            end
+            return {gold=0,artifacts=0,
+                source="story-trash-native-chance-not-triggered"}
+        end
+        -- Native physical-actor resource rewards can also be specified
+        -- directly as a HeldenMoney struct rather than through a row.
+        local amountStruct=get(actor,"ResourceDropAmount")
+        local gold=number(get(amountStruct,"Gold"),0,CFG.MaxCoinsPerDrop) or 0
+        local artifacts=number(get(amountStruct,"Artifacts"),0,CFG.MaxCoinsPerDrop) or 0
+        if gold>0 or artifacts>0 then
+            return {gold=gold,artifacts=artifacts,
+                source="story-physics-resource-drop-amount"}
+        end
+    end
     return inspectedZero
 end
 -- The destroyed actor's GetInstigatorController() describes the actor's
@@ -1439,13 +1473,17 @@ local function destructionEvent(ctx,origin)
     local at=location(a)
     local world
     pcall(function() world=a:GetWorld() end)
-    if not at or not valid(world) then
-        log("DESTRUCTION "..origin.." cannot resolve world/position; no payout")
-        return
+    -- Direct wallet credits do not need a World or a currency SpawnActor.
+    -- Story construction actors can lose their World during destruction.
+    -- Keep the event if their position is known; a single valid player can
+    -- also be paid without a position.
+    if not at and S.rewardEvents<=12 then
+        log("DESTRUCTION POSITION UNKNOWN "..tostring(key)..
+            " (wallet-only payout will retry owner selection)")
     end
     S.destructionSeen[key]=true
     local recipient,ownership=selectDestroyer(a,origin)
-    S.dropQueue[#S.dropQueue+1]={world=world,at=at,key=key,
+    S.dropQueue[#S.dropQueue+1]={at=at,key=key,
         gold=value.gold,artifacts=value.artifacts,source=value.source,
         recipient=recipient,recipientSource=ownership,
         queued=os.clock(),goldDone=false,artifactDone=false}
