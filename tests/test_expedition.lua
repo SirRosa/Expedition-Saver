@@ -805,7 +805,28 @@ test("solo furniture reward credits wallet directly without coin actors",functio
     assert(t.corpse.Money.Gold==100,"two hooks must not credit twice")
 end)
 
-test("confirmed instigator targets correct player with two controllers",function()
+test("verified active damage overlap targets correct co-op player",function()
+    local t=fixture()
+    local second=actor({_name="HeldenPlayerController /Game/P2"})
+    local secondPawn=actor({_name="HeldenPlayerCharacter /Game/P2Pawn",
+        Money={Gold=5,Artifacts=1,Scraps=9}})
+    function second:GetPawn() return secondPawn end
+    t.listing.HeldenPlayerController[2]=second
+    local attackBox=actor({bDamageActive=true})
+    function attackBox:GetOwner() return secondPawn end
+    t.tick(0)
+    local h=t.hooks["/Script/Helden.HeldenDamageBoxComponent:OnTriggerOverlapBegin"]
+    assert(h and h.pre,"active damage event hook is required")
+    h.pre(attackBox,nil,t.loot)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==80)
+    assert(secondPawn.Money.Gold==25 and secondPawn.Money.Artifacts==7)
+    assert(secondPawn.Money.Scraps==9,"destroy reward must not touch scrap")
+end)
+
+test("victim actor instigator alone is NOT trustworthy co-op damage proof",function()
     local t=fixture()
     local second=actor({_name="HeldenPlayerController /Game/P2"})
     local secondPawn=actor({_name="HeldenPlayerCharacter /Game/P2Pawn",
@@ -816,10 +837,8 @@ test("confirmed instigator targets correct player with two controllers",function
     t.tick(0)
     t.destroyLoot(true)
     t.tick(0)
-    assert(#t.spawned==0)
-    assert(t.corpse.Money.Gold==80)
-    assert(secondPawn.Money.Gold==25 and secondPawn.Money.Artifacts==7)
-    assert(secondPawn.Money.Scraps==9,"destroy reward must not touch scrap")
+    assert(#t.spawned==2,"not enough proof of destruction to award to actor creator")
+    assert(secondPawn.Money.Gold==5)
 end)
 
 test("ambiguous multiplayer leaves physical coin fallback instead of wrong wallet",function()
