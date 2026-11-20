@@ -243,7 +243,7 @@ local S={
     coinBaseline={},coinBaselineCycle=0,coinBaselineReady=false,
     coinEventsActive=false,createdCoinActors={},
     currencyCleanup={},claimedDeathCoins={},
-    failureChecks=0,storyLootDiagnosticCount=0,
+    failureChecks=0,storyLootDiagnosticCount=0,rewardOwnerDiagnosticCount=0,
     mode=nil
 }
 local function deathAllowed(ctx)
@@ -314,6 +314,7 @@ local function resetForSave(ctx,key,slot)
     S.createdCoinActors={}
     S.claimedDeathCoins={}
     S.damageHits={};S.attackIntents={};S.pollCycle=0
+    S.rewardOwnerDiagnosticCount=0
     S.gearScanTick=-1;S.gearScanObjects={}
     S.cachedControllers=nil;S.controllerScanTick=-1
     S.nextBackupDepth=-1
@@ -1525,7 +1526,26 @@ local function nearestPlayerAt(at)
         end
     end
     if eligible==1 and valid(sole) then return sole,"sole-player" end
-    if eligible==0 then return nil,"no-eligible-player" end
+    if eligible==0 then
+        -- The v0.7.3 log exposed this exact failure; retain a cheap,
+        -- strictly capped trace on real destruction events so any future
+        -- mismatch reveals the controller and LastPlayerChar at once.
+        if S.rewardOwnerDiagnosticCount<4 then
+            S.rewardOwnerDiagnosticCount=S.rewardOwnerDiagnosticCount+1
+            for _,pc in ipairs(playerControllers()) do
+                local current=currentPawn(pc)
+                local last=resolveWeak(unwrap(get(pc,"LastPlayerChar")))
+                local money=get(last,"Money")
+                log("REWARD OWNER TRACE pc="..tostring(path(pc))..
+                    " GetPawn="..tostring(path(current))..
+                    " LastPlayerChar="..tostring(path(last))..
+                    " LastHP="..tostring(get(get(last,"CharacterStats"),"CurrentHealth"))..
+                    " LastGold="..tostring(get(money,"Gold"))..
+                    " LastArtifacts="..tostring(get(money,"Artifacts")))
+            end
+        end
+        return nil,"no-eligible-player"
+    end
     if valid(best) then return best,"nearest-player" end
     if not at then return sole,"no-destroy-position-first-live-player" end
     if unknownPositions>0 then
