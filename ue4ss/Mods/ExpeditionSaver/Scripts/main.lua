@@ -12,8 +12,8 @@ local CFG = {
     MaxGearPerPlayer = 60,
     EnableNoPermadeath = true,
     EnablePhysicalCoins = true,
-    RespawnDelaySeconds = 1.25,
-    RespawnRetrySeconds = 2.5,
+    RespawnDelaySeconds = 0.15,
+    RespawnRetrySeconds = 1.5,
     MaxRespawnRequests = 3,
     BackupFile = true,
     MaxCoinsPerDrop = 100000,
@@ -753,6 +753,17 @@ local function watchControllerKilled(context)
     local old=get(pc,"LastPlayerChar")
     if valid(old) then captureDeath(old) end
 end
+local function immediatelyRequestRespawn(context)
+    local pc=unwrap(context)
+    if not valid(pc) or not onHost() then return end
+    local entry=S.pending[path(pc)]
+    if not entry or entry.attempts>0 then return end
+    entry.attempts=1
+    entry.nextRequest=os.clock()+CFG.RespawnRetrySeconds
+    local ok,err=pcall(function() pc:RespawnCharacter_Server() end)
+    log("IMMEDIATE RESPAWN on OnPlayerKilled post -> "..tostring(ok)..
+        (ok and "" or ": "..tostring(err)))
+end
 local function watchNewPawn(context,oldPawn,newPawn)
     local pc=unwrap(context)
     local pawn=unwrap(newPawn)
@@ -800,7 +811,10 @@ hook("/Script/Helden.HeldenCharacter:Die_Auth",
      safePre("Die_Auth",watchDeath))
 hook("/Script/Helden.HeldenPlayerController:OnPlayerKilled",
      safePre("OnPlayerKilled",watchControllerKilled),
-     safePre("OnPlayerKilledPost",watchControllerKilled))
+     safePre("OnPlayerKilledPost",function(context,...)
+         watchControllerKilled(context,...)
+         immediatelyRequestRespawn(context)
+     end))
 hook("/Script/Helden.HeldenPlayerController:OnNewPawn",
      function() end,safePre("OnNewPawn",watchNewPawn))
 if CFG.EnableNoPermadeath then
@@ -845,9 +859,15 @@ hook("/Script/Helden.HeldenPhysicsActor:OnHealthModifed",
      safePre("health",function(context) destructionEvent(context,"health") end))
 hook("/Script/Helden.HeldenPhysicsActor:PlayDestructionEffect_Mulitcast",
      safePre("destruction",function(context) destructionEvent(context,"effect") end))
-local function safePoll()
+local function safePoll(onTimer)
     local now=os.clock()
-    if S.lastPoll>=0 and now>=S.lastPoll and now-S.lastPoll<CFG.PollSeconds then return end
+    -- The engine-thread delayed loop already throttles callbacks. os.clock
+    -- measures CPU time on Windows and must NOT gate that loop; otherwise
+    -- pauses/slow frames can postpone a respawn until after party wipe.
+    if not onTimer then
+        if S.lastPoll>=0 and now>=S.lastPoll and
+            now-S.lastPoll<CFG.PollSeconds then return end
+    end
     S.lastPoll=now
     retryHooks()
     local ok,err=pcall(poll)
@@ -867,13 +887,13 @@ end
 local scheduled=false
 if type(LoopInGameThreadWithDelay)=="function" then
     local ok=pcall(function()
-        LoopInGameThreadWithDelay(450,function() safePoll() end)
+        LoopInGameThreadWithDelay(300,function() safePoll(true) end)
     end)
-    if ok then scheduled=true;log("game-thread timer active (450 ms)") end
+    if ok then scheduled=true;log("game-thread timer active (300 ms)") end
 elseif type(LoopAsync)=="function" and type(ExecuteInGameThread)=="function" then
     local ok=pcall(function()
-        LoopAsync(450,function()
-            pcall(function() ExecuteInGameThread(function() safePoll() end) end)
+        LoopAsync(300,function()
+            pcall(function() ExecuteInGameThread(function() safePoll(true) end) end)
             return false
         end)
     end)
