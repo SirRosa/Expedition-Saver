@@ -1172,7 +1172,8 @@ local function recordDamage(target,pc,kind)
         prev.tick=S.pollCycle
     else
         S.damageHits[key]={player=player,tick=S.pollCycle,kind=kind,
-            ambiguous=prev and prev.ambiguous or false}
+            ambiguous=(prev and S.pollCycle-prev.tick<=2 and
+                prev.ambiguous) or false}
     end
 end
 
@@ -1181,13 +1182,14 @@ local function selectDestroyer(actor)
     local key=path(actor)
     local hit=key and S.damageHits[key] or nil
     local recent=hit and S.pollCycle-hit.tick<=2
-    local sole,chosen,count=nil,nil,0
+    local sole,chosen,players,eligible=nil,nil,0,0
     for _,pc in ipairs(all("HeldenPlayerController")) do
         if valid(pc) then
+            players=players+1
             local pawn=currentPawn(pc)
             if valid(pawn) and get(pawn,"Money") then
-                count=count+1
-                if count==1 then sole=pawn end
+                eligible=eligible+1
+                if eligible==1 then sole=pawn end
                 if recent and not hit.ambiguous and path(pc)==hit.player then
                     chosen=pawn
                 end
@@ -1195,8 +1197,11 @@ local function selectDestroyer(actor)
         end
     end
     if valid(chosen) then return chosen,"verified-"..hit.kind end
-    if count==1 and valid(sole) then return sole,"single-player" end
-    return nil,count>1 and "unverified-coop" or "no-owner"
+    -- If another player is dead, do not treat this as a solo session.
+    if players==1 and eligible==1 and valid(sole) then
+        return sole,"single-player"
+    end
+    return nil,players>1 and "unverified-coop" or "no-owner"
 end
 
 local function creditReward(pawn,currency,amount)
