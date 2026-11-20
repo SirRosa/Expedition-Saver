@@ -790,6 +790,52 @@ end
 -- Game preserves an EndScreen/Failed state after the final death. Updating
 -- DungeonLevel alone does NOT unlock the machine; repair the run AND its
 -- interaction gate only after the elevator is back at the home station.
+-- Expedition's door is a separate Blueprint actor, not the elevator
+-- machine. v0.3 never touched BP_ExpeditionFailed_Actor_C; it remained solid
+-- even after GameState flags were cleared (confirmed by live object dump).
+local function repairFailedDoor(ctx)
+    if not CFG.EnableNoPermadeath or not S.recoveryRequired then return end
+    if ctx.phase==1 or ctx.phase==2 then return end
+    local observed=0
+    for _,barrier in ipairs(all("BP_ExpeditionFailed_Actor_C")) do
+        local key=path(barrier)
+        if valid(barrier) and key and
+            key:find("PersistentLevel",1,true) and
+            not key:find("Default__",1,true) then
+            observed=observed+1
+            local failed=get(barrier,"bFailedExpedition")
+            if failed~=false then
+                put(barrier,"bFailedExpedition",false)
+                pcall(function() barrier:OnRep_bFailedExpedition() end)
+                pcall(function() barrier:UpdateCollisionSate() end)
+            end
+            -- Regardless of BP flag, remove the physical door collision
+            -- on the authoritative host. Never destroy the actor, which may
+            -- have other OnObjetEvent handlers needed for the next run.
+            pcall(function() barrier:SetActorEnableCollision(false) end)
+            for _,component in ipairs({
+                    get(barrier,"Box"),
+                    get(barrier,"SM_SM_Door_Lock"),
+                    get(barrier,"Cube")}) do
+                if valid(component) then
+                    pcall(function() component:SetCollisionEnabled(0) end)
+                    pcall(function() component:SetVisibility(false,true) end)
+                end
+            end
+            if S.failedBarriers<5 then
+                log("FAILURE DOOR disabled actor="..key..
+                    " wasFailed="..tostring(failed)..
+                    " nowFailed="..tostring(get(barrier,"bFailedExpedition")))
+                S.failedBarriers=S.failedBarriers+1
+            end
+        end
+    end
+    if observed==0 and S.failedBarriers==0 then
+        S.failedBarriers=-1
+        log("FAILURE DOOR: no live BP_ExpeditionFailed_Actor_C found")
+    end
+end
+
 local function repairElevator(ctx)
     if not CFG.EnableNoPermadeath or not S.recoveryRequired then return end
     if ctx.phase==1 or ctx.phase==2 then return end
@@ -799,7 +845,8 @@ local function repairElevator(ctx)
     S.machineRepairCycle=0
     S.machineRepairAttempts=S.machineRepairAttempts+1
     local lift=first("HeldenDungeonElevator")
-    local machine=first("HeldenElevatorMachine")
+    local machine=valid(lift) and get(lift,"ElevatorMachine") or nil
+    if not valid(machine) then machine=first("HeldenElevatorMachine") end
     if valid(lift) then
         local home=number(get(lift,"HomeStationIdx"),0,256)
         local station=number(get(lift,"CurrentStationIdx"),0,256)
@@ -894,6 +941,7 @@ local function poll()
     monitorPlayers(ctx)
     processDeaths(ctx)
     repairElevator(ctx)
+    repairFailedDoor(ctx)
     processDropQueue()
     if ctx.phase==1 or ctx.phase==2 then
         if S.phase==0 or S.phase==3 then
