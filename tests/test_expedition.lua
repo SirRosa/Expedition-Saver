@@ -380,4 +380,53 @@ test("Expedition mode recovery accepts metadata after runtime mode resets",funct
     assert(t.md.bHasFailed==false)
 end)
 
+test("real HeldenConstructActor getter and weak dungeon pointer produce QOL payout",function()
+    local t=fixture();t.tick(0)
+    t.loot.GetInspectData=nil
+    t.loot.OwningDungeon={Get=function() return t.run.DungeonActor end}
+    function t.loot:GetConstructAssetData()
+        return {Parsed_ScrapValue_Epic={Gold=60,Artifacts=4,Scraps=5}}
+    end
+    t.destroyLoot();t.tick(0)
+    assert(#t.spawned==2)
+    assert(t.spawned[1].coin.Money.Gold==60)
+    assert(t.spawned[2].coin.Money.Artifacts==4)
+    assert(t.spawned[1].coin.Money.Scraps==0)
+end)
+test("physics loot with no GetInspectData uses patched PhysActorData and weak ownership",function()
+    local t=fixture();t.tick(0)
+    t.loot.GetInspectData=nil
+    t.loot.OwningDungeon={Get=function() return t.run.DungeonActor end}
+    t.loot.StatsDataName="RustyJunk"
+    t.destroyLoot();t.tick(0)
+    assert(#t.spawned==2)
+    assert(t.spawned[1].coin.Money.Gold==45)
+    assert(t.spawned[2].coin.Money.Artifacts==2)
+end)
+test("respawn and loot payout do not wait for os.clock CPU time",function()
+    local t=fixture();t.tick(0);t.killed()
+    t.tick(0)
+    assert(t.counts.respawn==1,"respawn should start on next engine tick")
+    t.tick(0)
+    assert(t.newPawn.location and t.newPawn.location.Z==380)
+    t.destroyLoot();t.tick(0)
+    assert(#t.spawned==2,"coin payout should not need CPU-time to elapse")
+end)
+test("run recovery starts on failed EndScreen even without earlier exploring heartbeat",function()
+    local t=fixture()
+    t.run.State=3;t.run.Flags=1;t.md.bHasFailed=true
+    t.tick(0)
+    assert(t.run.State==0 and not t.md.bHasFailed)
+    assert(t.machine.interactionEnabled==true)
+end)
+test("same-slot save instance swap retains depth and recovery",function()
+    local t=fixture();t.save.DungeonLevel=8;t.tick(0)
+    local newSave=actor({_name="SaveGame /Game/S0_new",MetaData={GameSlot=0,GameMode=1,bHasFailed=true},
+        GameMode=1,DungeonLevel=0,TimePlayed=30,DungeonFails=0})
+    t.gi.CurrentSaveGame=newSave
+    t.run.State=3;t.run.Flags=1;t.tick(0)
+    assert(newSave.DungeonLevel==8,"depth should survive save object rotation")
+    assert(newSave.MetaData.bHasFailed==false)
+end)
+
 print("ALL TESTS PASSED ("..passed..")")
