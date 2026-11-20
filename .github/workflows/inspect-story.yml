@@ -1,0 +1,44 @@
+name: Inspect Story mode respawn and loot reflection
+on:
+  push:
+    branches: [fix/story-respawn-rewards-and-death-dup-v07]
+    paths: ['.github/workflows/inspect-story.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect game reflection dump and enums
+        run: |
+          set -euo pipefail
+          base=https://raw.githubusercontent.com/SirRosa/Grain-Rot-Mod-Data-Base/main/data
+          curl -fsSL "$base/current-schema.json.gz" -o /tmp/schema.gz
+          gzip -dc /tmp/schema.gz >/tmp/schema.json
+          python3 - <<'PY'
+          import json
+          s=json.load(open('/tmp/schema.json'))
+          structs=s['structs']; enums=s['enums']
+          print('=== MODE ENUMS ===')
+          for k,v in enums.items():
+            if 'game' in k.lower() and 'mode' in k.lower() or 'dungeon' in k.lower() and ('mode' in k.lower() or 'state' in k.lower()):
+              print(k,str(v)[:2000])
+          print('=== RELEVANT REFLECTED PROPERTIES ===')
+          for k in ('HeldenGameState','HeldenSaveGame','HeldenPlayerController','HeldenCharacter','HeldenPlayerCharacter','HeldenGameMode','HeldenPhysicsCoin','HeldenPhysicsActor','HeldenDungeonElevator','HeldenCharacterSoul'):
+            v=structs.get(k)
+            if not v:continue
+            print('CLASS',k,'PARENT',v.get('parent'))
+            for p in v['properties']:
+              n=p['name'].lower()
+              if any(x in n for x in ('mode','money','death','respawn','checkpoint','spawn','lastplayer','soul','save','health','drop','inventory','actor','coin','owner','instigator','pawn','state','character','level','home','return')):
+                print(' PROP',p['name'],p.get('type'),p.get('struct'),p.get('enum'))
+          PY
+          for n in 01 02 03 04 05 06; do curl -fsSL "$base/UE4SS-ObjectDump.txt.gz.part$n" -o "/tmp/part$n"; done
+          cat /tmp/part0* | gzip -dc >/tmp/objects.txt
+          echo '=== CHARACTER/CONTROLLER RESPAWN and reset methods ==='
+          grep -Ei 'Function /Script/Helden.(HeldenPlayerController|HeldenCharacter|HeldenGameMode|HeldenPlayerCharacter):[^ ]*(Spawn|Respawn|Revive|Checkpoint|Reset|Possess|NewPawn|Killed|Die_|Teleport|Return)' /tmp/objects.txt | head -150 || true
+          echo '=== COIN PICKUP/INVENTORY MONEY EVENTS ==='
+          grep -Ei 'Function /Script/Helden.[^ :]+:[^ ]*(Money|Coin|Currency|Drop|Pickup|PickedUp|Scrap)' /tmp/objects.txt | head -140 || true
+          echo '=== WORLD START ACTORS ==='
+          grep -Ei 'Class /Script/(Helden|Engine).*(PlayerStart|Checkpoint|Respawn|Elevator|SavePoint)' /tmp/objects.txt | head -90 || true
