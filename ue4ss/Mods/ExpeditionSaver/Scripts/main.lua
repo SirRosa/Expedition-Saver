@@ -2502,4 +2502,7 @@ hook("/Script/Engine.PlayerController:ClientRestart",
          S.coinLedger={}
          S.dropQueue={};S.destructionSeen={}
      end)
+-- Preload the tiny native DLL at mod startup. Death/respawn will only make
+-- one direct, non-blocking PlaySoundW call; no first-play DLL load latency.
+if CFG.EnableRespawnSound then loadRespawnSound() end
 log("v0.7.7 in-process WinMM audio: no CMD, host+client local respawn")
