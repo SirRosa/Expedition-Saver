@@ -1,0 +1,27 @@
+name: Inspect Grain Rot death currency reflection
+on:
+  push:
+    branches: [fix/death-currency-duplication]
+    paths: ['.github/workflows/inspect-currency.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect actual UE4SS object dump from reference repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=https://raw.githubusercontent.com/SirRosa/Grain-Rot-Mod-Data-Base/main/data
+          for n in 01 02 03 04 05 06; do
+            curl -fsSL --retry 2 "$base/UE4SS-ObjectDump.txt.gz.part$n" -o "/tmp/part$n"
+          done
+          cat /tmp/part0* | gzip -dc > /tmp/objects.txt
+          echo '=== ALL MATCHES: death/currency/drop methods ==='
+          grep -iE 'Function .*Helden.*(Money|Coin|Currency|Drop|OnDie|Die_|Death|Inventory|Loot)' /tmp/objects.txt | head -250 || true
+          echo '=== SPECIFIC: character / controller / death / coin methods ==='
+          grep -iE 'Function .*(HeldenCharacter|HeldenPlayerController|HeldenPhysicsCoin|HeldenCoinDispenser)' /tmp/objects.txt | grep -iE '(drop|death|money|coin|loot|inventory|pick|remove|die)' | head -250 || true
+          echo '=== DUMP samples ==='
+          head -n 12 /tmp/objects.txt
