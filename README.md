@@ -1,5 +1,17 @@
 # Grain Rot — Expedition Saver
 
+## v0.7.2 — Story loot diagnostics + reduced stutter (TEST)
+
+- **Story Mode:** destructible furniture can now pay Gold/Artifacts directly even when the actor's `GetWorld()` is unavailable at destruction. Only its known position/recipient wallet is needed.
+- Added a health-verified `HeldenConstructActor:DisableCollision_Multicast` destruction hook to supplement `HeldenPhysicsActor:OnHealthModifed` / `PlayDestructionEffect_Mulitcast`. Nonlethal collision changes do NOT award currency.
+- Additional reflected native Story loot sources: `HeldenTrashConstruct.RandomMoneySpawn` = `HeldenMoneyResource {Type,Amount}` (types 1=Gold, 2=Artifacts), subject to `MoneySpawnChance`; and `HeldenPhysicsActor.ResourceDropAmount`. Rewards configured only as Scraps do not fabricate other currencies.
+- `STORY LOOT DIAG` writes **at most 12 records** with actor, native reward, data source and money type to help identify unhandled furniture if it persists.
+- **Performance:** cache player controller searches for 3s, world-wide equipment registry searches for 9s, currency baseline scans for 9s at healthy HP / 1.2s at critical health, and post-death currency cleanup scans for at most once every 2.4s (plus immediate first scan), rather than every 300ms. Respawn polling remains 300ms.
+- Preserve native respawn and previous anti-duplication workflow; **currency baseline scans are less frequent and therefore protection against unrelated very recently spawned nearby coins is less conservative than before**. Back up saves. If a coin goes missing or duplication occurs, capture `UE4SS.log`.
+- Furniture Gold and Artifact Coins still go directly to the recognized attacker or nearest player, with **no mod-generated physical coin fallback**. Native scrap drops are unchanged.
+- The test suite uses mocked UE4SS, not Grain Rot itself. FPS, network replication, and complete Story mode coverage remain unconfirmed until real-game testing.
+
+
 ## v0.7.1 — bez fizycznego dropu walut za meble (TEST)
 
 **W Story Mode i Expedition wszystkie Gold i Artifact Coins z niszczenia mebli są wpłacane bezpośrednio do portfela gracza.** Żaden przypadek nie wywołuje `SpawnActor` dla monet ani nie uruchamia ich fizyki.
