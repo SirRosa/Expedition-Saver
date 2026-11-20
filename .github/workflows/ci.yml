@@ -2,7 +2,7 @@ name: Expedition Saver — validate, test and package
 
 on:
   push:
-    branches: [main, fix/death-currency-duplication, feature/direct-rewards-performance, fix/story-respawn-rewards-and-death-dup-v07, fix/nearest-recipient-no-physical-rewards, fix/story-loot-stutter-v072, fix/story-currency-event-perf-v073, fix/live-log-lastplayerchar-rewards-v074, feature/respawn-audio-v075, feature/respawn-audio-host-client-v076]
+    branches: [main, fix/death-currency-duplication, feature/direct-rewards-performance, fix/story-respawn-rewards-and-death-dup-v07, fix/nearest-recipient-no-physical-rewards, fix/story-loot-stutter-v072, fix/story-currency-event-perf-v073, fix/live-log-lastplayerchar-rewards-v074, feature/respawn-audio-v075, feature/respawn-audio-host-client-v076, fix/respawn-audio-inprocess-v077]
   pull_request:
   workflow_dispatch:
 
@@ -33,13 +33,13 @@ jobs:
           mkdir -p out
           zip -r out/ExpeditionMapper-v0.1.0.zip ue4ss/Mods/ExpeditionMapper/
           unzip -t out/ExpeditionMapper-v0.1.0.zip
-          zip -r out/ExpeditionSaver-v0.7.6-host-client-respawn-audio-test.zip ue4ss/Mods/ExpeditionSaver/
-          unzip -t out/ExpeditionSaver-v0.7.6-host-client-respawn-audio-test.zip
+          zip -r out/ExpeditionSaver-v0.7.7-inprocess-no-cmd-test.zip ue4ss/Mods/ExpeditionSaver/
+          unzip -t out/ExpeditionSaver-v0.7.7-inprocess-no-cmd-test.zip
       - name: Publish install ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: ExpeditionSaver-v0.7.6-host-client-respawn-audio-test
-          path: out/ExpeditionSaver-v0.7.6-host-client-respawn-audio-test.zip
+          name: ExpeditionSaver-v0.7.7-inprocess-no-cmd-test
+          path: out/ExpeditionSaver-v0.7.7-inprocess-no-cmd-test.zip
           if-no-files-found: error
 
   build-win64-respawn-audio:
@@ -48,21 +48,34 @@ jobs:
       - uses: actions/checkout@v4
       - name: Prepare MSVC x64 compiler
         uses: ilammy/msvc-dev-cmd@v1
-      - name: Build minimal windowless WinMM player
+      - name: Build in-process WinMM Lua DLL (no EXE / no CMD)
         shell: cmd
         run: |
-          cl /nologo /O2 /W4 /MT /EHsc /DUNICODE /D_UNICODE /Fe:respawn_audio.exe ue4ss\\Mods\\ExpeditionSaver\\Audio\\respawn_audio.cpp /link /SUBSYSTEM:WINDOWS winmm.lib shell32.lib
+          cl /nologo /O2 /W4 /MT /LD /EHsc ue4ss\\Mods\\ExpeditionSaver\\Audio\\respawn_audio.cpp /link /OUT:respawn_audio.dll winmm.lib
           if errorlevel 1 exit /b 1
-          if not exist respawn_audio.exe exit /b 1
-      - name: Verify audio helper exists
+          if not exist respawn_audio.dll exit /b 2
+          dumpbin /EXPORTS respawn_audio.dll | findstr /C:"luaopen_RespawnSound"
+          if errorlevel 1 exit /b 3
+      - name: Build and run native DLL smoke test
+        shell: cmd
+        run: |
+          cl /nologo /O2 /W4 /MT /EHsc tests\\audio_smoke.cpp /link /OUT:audio_smoke.exe
+          if errorlevel 1 exit /b 4
+          audio_smoke.exe
+          if errorlevel 1 exit /b 5
+      - name: Validate source does not spawn CMD or shell process
         shell: pwsh
         run: |
-          $file = Get-Item "respawn_audio.exe"
-          if ($file.Length -lt 4096 -or $file.Length -gt 1000000) { throw "Unexpected Win64 helper size" }
-          Write-Host ("RespawnAudio Win64 built: {0} bytes" -f $file.Length)
-      - name: Publish Win64 WAV player
+          $source=Get-Content ue4ss/Mods/ExpeditionSaver/Scripts/main.lua -Raw
+          if ($source -match 'os\\.execute\\s*\\(') { throw 'Audio must never use os.execute' }
+          if ($source -match 'respawn_audio\\.exe') { throw 'Old EXE references remain' }
+          if ($source -notmatch 'package\\.loadlib') { throw 'Missing native DLL loader' }
+          $dll=Get-Item respawn_audio.dll
+          if ($dll.Length -lt 4096 -or $dll.Length -gt 500000) { throw 'Invalid DLL size' }
+          Write-Host ("PASS: in-process audio DLL = {0} bytes" -f $dll.Length)
+      - name: Publish x64 native audio DLL
         uses: actions/upload-artifact@v4
         with:
-          name: ExpeditionSaver-v0.7.6-RespawnAudio-Win64
-          path: respawn_audio.exe
+          name: ExpeditionSaver-v0.7.7-RespawnAudio-Win64-DLL
+          path: respawn_audio.dll
           if-no-files-found: error
