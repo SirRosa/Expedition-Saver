@@ -238,7 +238,7 @@ local function fixture(useCoinNotifications)
             local h=hooks["/Script/Helden.HeldenPhysicsActor:OnHealthModifed"]
             local d=hooks["/Script/Helden.HeldenPhysicsActor:PlayDestructionEffect_Mulitcast"]
             assert(h and d,"destruction hooks not registered")
-            h.pre(loot)
+            h.post(loot)
             d.pre(loot)
         end,
         switchMode=function(mode)
@@ -383,10 +383,10 @@ test("hammer destruction below health zero is required for health trigger",funct
     local t=fixture();t.tick()
     t.loot.StatsComponent.CurrentHealth=10
     local h=t.hooks["/Script/Helden.HeldenPhysicsActor:OnHealthModifed"]
-    h.pre(t.loot);t.tick(1)
+    h.post(t.loot);t.tick(1)
     assert(#t.spawned==0)
     t.loot.StatsComponent.CurrentHealth=0
-    h.pre(t.loot);t.tick(1)
+    h.post(t.loot);t.tick(1)
     assert(#t.spawned==0)
     assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
         "lethal callback must pay the solo player directly")
@@ -1322,6 +1322,80 @@ test("event-created death coin after first scan is removed without a full regist
         "late death coin must be cleaned up from object notification")
     assert(t.newPawn.Money.Gold==80 and t.newPawn.Money.Artifacts==4)
     assert(t.item:IsValid(),"gear remains untouched")
+end)
+
+test("LIVE UE4SS(7): Story GetPawn nil resolves LastPlayerChar and credits Gold",function()
+    local t=fixture()
+    t.switchMode(0)
+    function t.pc:GetPawn() return nil end
+    -- This matches the actual GrainRotQuickJunk DIAG in UE4SS(7):
+    -- source=LastPlayerChar raw=none while a healthy Story pawn exists.
+    assert(t.pc.LastPlayerChar==t.corpse)
+    t.tick(0)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(#t.spawned==0,"no physical currency")
+    assert(t.corpse.Money.Gold==100,
+        "15-20 Gold is awarded to LastPlayerChar instead of recipient=nil")
+    assert(t.corpse.Money.Artifacts==10)
+    for _,entry in ipairs(t.logs) do
+        assert(not entry:find("no-eligible-player",1,true),
+            "one live Story character must never be marked ineligible")
+    end
+end)
+
+test("LIVE UE4SS(7): Story GetPawn nil pays nearest of two LastPlayerChar pawns",function()
+    local t=fixture()
+    t.switchMode(0)
+    function t.pc:GetPawn() return nil end
+    local second=actor({_name="HeldenPlayerController /Game/Second"})
+    local secondPawn=actor({_name="BP_HeldenPlayerCharacter_C /Game/Near",
+        Money={Gold=1,Artifacts=2,Scraps=3},
+        CharacterStats=actor({CurrentHealth=95})})
+    second.LastPlayerChar=secondPawn
+    function second:GetPawn() return nil end
+    function secondPawn:K2_GetActorLocation() return {X=1000,Y=1979.9,Z=300} end
+    t.listing.HeldenPlayerController[2]=second
+    t.tick(0);t.destroyLoot(true);t.tick(0)
+    assert(t.corpse.Money.Gold==80,
+        "the more distant Story player must not receive Gold")
+    assert(secondPawn.Money.Gold==21 and secondPawn.Money.Artifacts==8,
+        "a 1mm difference should choose the other LastPlayerChar")
+end)
+
+test("LIVE UE4SS(7): Story dead LastPlayerChar must not receive money",function()
+    local t=fixture()
+    t.switchMode(0)
+    function t.pc:GetPawn() return nil end
+    t.corpse.CharacterStats.CurrentHealth=0
+    local recipient=actor({_name="BP_HeldenPlayerCharacter_C /Game/Alive",
+        Money={Gold=2,Artifacts=0,Scraps=0},
+        CharacterStats=actor({CurrentHealth=100})})
+    function recipient:K2_GetActorLocation() return {X=1050,Y=1980,Z=300} end
+    local second=actor({_name="HeldenPlayerController /Game/AlivePC",
+        LastPlayerChar=recipient})
+    function second:GetPawn() return nil end
+    t.listing.HeldenPlayerController[2]=second
+    t.tick(0);t.destroyLoot(true);t.tick(0)
+    assert(t.corpse.Money.Gold==80)
+    assert(recipient.Money.Gold==22)
+end)
+
+test("nonlethal health spam does not run expensive destruction lookup",function()
+    local t=fixture()
+    t.tick(0)
+    local h=t.hooks["/Script/Helden.HeldenPhysicsActor:OnHealthModifed"]
+    local n=t.counts.all
+    t.loot.StatsComponent.CurrentHealth=20
+    for i=1,5000 do h.pre(t.loot);h.post(t.loot) end
+    assert(t.counts.all==n,
+        "5,000 harmless health callbacks must not trigger UObject registry scans")
+    assert(t.corpse.Money.Gold==80)
+    assert(t.corpse.Money.Artifacts==4)
+    t.loot.StatsComponent.CurrentHealth=0
+    h.post(t.loot);t.tick(0)
+    assert(t.corpse.Money.Gold==100,
+        "the actual zero-HP event must still award the furniture currency")
 end)
 
 print("ALL TESTS PASSED ("..passed..")")
