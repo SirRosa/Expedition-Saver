@@ -235,16 +235,17 @@ local function keepExpedition(ctx)
             log("failed Expedition run; keeping dungeon depth "..S.depth)
         end
     end
+    -- Clear permanent flags even during Exploration: the native game may
+    -- set them at the instant the last party member dies.
+    local md=get(ctx.save,"MetaData")
+    if md and get(md,"bHasFailed")==true then
+        if put(md,"bHasFailed",false) then log("suppressed permanent failure in SaveGame metadata") end
+    end
+    if get(ctx.gs,"bExpeditionFailed")==true then
+        if put(ctx.gs,"bExpeditionFailed",false) then log("cleared expedition failure in runtime") end
+    end
     if ctx.phase==3 or ctx.phase==0 then
-        -- Do not clear the game's run 'Failed' flag: it drives the end screen.
-        -- Clear only the persistent death/permadeath markers.
-        local md=get(ctx.save,"MetaData")
-        if md and get(md,"bHasFailed")==true then
-            if put(md,"bHasFailed",false) then log("suppressed permanent failure in SaveGame metadata") end
-        end
-        if get(ctx.gs,"bExpeditionFailed")==true then
-            if put(ctx.gs,"bExpeditionFailed",false) then log("cleared expedition failure in runtime") end
-        end
+        -- Do not clear CurrentDungeonRun.Flags.Failed: the end screen uses it.
         if raw<S.depth and (S.failed or (ctx.phase==0 and not S.active)) then
             if put(ctx.save,"DungeonLevel",S.depth) then
                 log("restored Expedition depth "..raw.." -> "..S.depth)
@@ -550,6 +551,19 @@ hook("/Script/Helden.HeldenPlayerController:OnPlayerKilled",
      function() end,watchControllerKilled)
 hook("/Script/Helden.HeldenPlayerController:OnNewPawn",
      function() end,watchNewPawn)
+if CFG.EnableNoPermadeath then
+    -- Native post-hook return override, documented in UE4SS RegisterHook.
+    -- A false result is intentionally restricted to the Expedition game
+    -- mode and authoritative host; it does not touch normal saves.
+    hook("/Script/Helden.HeldenGameState:HasFailedExpedition",
+        function() end,
+        function(context)
+            local gs=unwrap(context)
+            if onHost() and valid(gs) and enum(get(gs,"GameModeType"))==1 then
+                return false
+            end
+        end)
+end
 local function safePoll()
     local now=os.clock()
     if S.lastPoll>=0 and now>=S.lastPoll and now-S.lastPoll<CFG.PollSeconds then return end
