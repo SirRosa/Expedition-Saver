@@ -1,47 +1,41 @@
 # Grain Rot — Expedition Saver
 
-**v0.1.0-alpha | testowa wersja moda UE4SS | tylko tryb Expedition i host.**
+**v0.2.0-alpha — nowa wersja testowa, niezweryfikowana wewnątrz gry.** Reakcja na zgłoszenie: v0.1.0 nie odradzała gracza, nie odblokowywała windy po porażce i nie wydawała Artifact Coins. Tamtego działania **nie uznajemy za potwierdzone**.
 
-Kod powstał na podstawie pliku mapowań wygenerowanego 20 listopada 2026 r. oraz pełnego zrzutu refleksji. **Zaliczone testy GitHub Actions symulują grę, nie potwierdzają działania w rzeczywistej sesji.** Wykonaj kopię zapisu.
+Repozytorium zawiera osobny mod gameplay `ExpeditionSaver` oraz niezależny, diagnostyczny `ExpeditionMapper` (niewymagany przy normalnej grze).
 
-## Funkcje
+## Funkcje v0.2.0
 
-| Żądana funkcja | Stan implementacji i ograniczenia |
+| Funkcja | Implementacja i ograniczenia |
 |---|---|
-| Respawn po śmierci w windzie | Przechwytuje serwerową śmierć gracza, następnie próbuje wywołać natywne `RespawnCharacter_Server`, przenieść nową postać do windy i przywrócić zdrowie. Nie działa poza Expedition. Nie jest jeszcze potwierdzone, że gra zezwala na takie odrodzenie po śmierci ostatniego gracza. |
-| Ekwipunek po odrodzeniu | Zachowuje referencje do istniejących przedmiotów. Te automatycznie wyposażone przez grę pozostawia nietknięte. Pozostałe *nadal istniejące* przedmioty próbuje przenieść do windy. **Nie odtwarza przedmiotów, które silnik już zniszczył**, i nie gwarantuje ponownego wyposażenia w slotach. To jeszcze nie jest pełna, potwierdzona realizacja „wszystkie itemki”. |
-| Koniec permadeath i ostatnie piętro | Próbuje nadpisać wynik `HasFailedExpedition`, wyczyścić trwałe flagi porażki i przywrócić najwyższe `DungeonLevel`. Ma pomocniczą, lokalną kopię głębokości per slot. Nie modyfikuje aktywnego seeda wygenerowanej mapy. Nie ma jeszcze testu powrotu z końca ekspedycji w grze. |
-| Fioletowy loot → fizyczne Artifact Coins | Na hoście naciśnij **F7** przy trzymanym albo wskazywanym przedmiocie klasy Epic. Wymagane są dodatnie `GetInspectData().Value.Artifacts`, bliskość i dostępna `ArtifactCoinActorClass`. Najpierw tworzy fizyczny żeton i weryfikuje wartość, a dopiero potem próbuje zniszczyć oryginał. Brak bezpośredniego dodawania żetonów do portfela. Pomija wskazane flagi questowe. Niepotwierdzone w multiplayer i nie gwarantuje atomowej transakcji, jeśli gra nadpisze aktora żetonu. |
+| **Respawn w windzie** | Używa hooków `HeldenCharacter.Die_Auth` oraz `HeldenPlayerController.OnPlayerKilled`. Żądanie `RespawnCharacter_Server()` wysyła niezwłocznie po natywnej obsłudze śmierci (i ponawia, jeśli nie było nowego pawna). Po uzyskaniu nowej postaci przenosi ją do windy i odnawia zdrowie. Próbuje także po przejściu gry do EndScreen. **Silnik może odrzucić respawn podczas zakończonej ekspedycji — do weryfikacji w grze**. |
+| **Cały ekwipunek** | Zachowuje referencje, klasę i dane itemów w chwili śmierci. Nie rusza sprzętu odtworzonego natywnie przez grę, przenosi ocalałe egzemplarze do windy, a zniszczone próbuje ponownie zespawnować jeden raz. **Rekreacja nie gwarantuje natywnego założenia do slotu ani trwałości po restarcie.** |
+| **Ostatnie piętro i brak permadeath** | Zachowuje `DungeonLevel`, wyłącza flagi `bHasFailed` / `bExpeditionFailed`, przechwytuje `HasFailedExpedition`. Po powrocie windy na stację domową próbuje usunąć EndScreen/Failed i odblokować `HeldenElevatorMachine` przez `SetCanBeInteracted_Auth` oraz `OnDungeonRunStateChanged`. Bez samoczynnego zjeżdżania windy. **Nie jest to jeszcze potwierdzone w prawdziwej sesji multiplayer.** |
+| **Zniszczenie lootu = fizyczne monety** | **Nie ma F7 ani innego skrótu.** `HeldenPhysicsActor.OnHealthModifed` i `PlayDestructionEffect_Mulitcast` wykrywają zniszczenie (np. młotkiem). Dla obiektu pochodzącego z lochu pobierają jego rzeczywiste wartości złota i Artifact Coins i upuszczają fizyczne monety. Domyślny drop scrapu pozostaje bez zmian; mod nie dodaje go ponownie. |
+| **Integracja z QOL** | Odczyt następuje **w chwili zniszczenia** z `GetInspectData().Value` albo zmodyfikowanych wierszy `ConstructAssetDataTable` i `PhysActorDataTable`. Jeżeli QOL zdążył zmienić nagrody, są odczytywane po zmianach, **bez kolejnego mnożenia**. |
+
+Wypłata jest wykonywana raz na obiekt w trakcie jednej sesji. Jeśli nie uda się potwierdzić spawnu fizycznej monety, mod zapisuje ostrzeżenie w logu. Unika niszczenia oryginalnego przedmiotu własnym kodem i pomija oznaczone przedmioty questowe.
 
 ## Instalacja
 
-1. Zrób **kopię zapisu gry** przed pierwszym uruchomieniem.
-2. Pobierz `ExpeditionSaver-v0.1.0-alpha.zip` z artefaktów ostatniego udanego przebiegu [GitHub Actions](https://github.com/SirRosa/Expedition-Saver/actions).
-3. Rozpakuj do `Grain Rot\Helden\Binaries\Win64\`. Powinno powstać `ue4ss\Mods\ExpeditionSaver\Scripts\main.lua` oraz `enabled.txt`. Nie instaluj kolejnego UE4SS.
-4. Gra z innymi osobami: instalacja **wyłącznie u hosta**. Przycisk F7 działa na hoście. Nie ma jeszcze klient-serwer RPC do zdalnego użycia tej funkcji.
-5. **Na pierwsze testy wyłącz Depth Keeper i QOL**, gdyż oba mogą modyfikować głębokość lub odzyskiwanie wyposażenia i utrudnią analizę.
+1. **Utwórz kopię zapisu gry.** Szczególnie ważne, ponieważ v0.2 zmienia stan zakończenia ekspedycji.
+2. Pobierz `ExpeditionSaver-v0.2.0-alpha.zip` z ostatniego udanego GitHub Actions.
+3. Wypakuj do `Grain Rot\Helden\Binaries\Win64\`. Powinno powstać `ue4ss\Mods\ExpeditionSaver\Scripts\main.lua` oraz `enabled.txt`.
+4. Zainstaluj **wyłącznie na hoście**, nie u klientów.
+5. Wyłącz stary Depth Keeper do testu mechaniki pięter. Jeżeli masz także QOL, pozostaw go włączonego do testów mnożników, **ale wyłącz w nim `InsuranceOnWipe`**, żeby oba mody nie odtwarzały tych samych przedmiotów po porażce. W QOL v0.1 ta opcja jest na początku `main.lua` w `CFG`.
 
-Mod `ExpeditionMapper` pozostaje w repozytorium jako **osobne, tylko diagnostyczne narzędzie**. Nie jest potrzebny do uruchomienia Expedition Saver i nie znajduje się w paczce gameplay.
+## Minimalny test i logowanie
 
-## Pierwszy test w grze (na kopii zapisu)
+1. Uruchom Expedition i upewnij się, że w `ue4ss\UE4SS.log` jest wpis `[ExpeditionSaver] v0.2.0-alpha loaded`.
+2. W logu szukaj `HOOK ACTIVE` dla `Die_Auth`, `OnPlayerKilled`, `PlayDestructionEffect_Mulitcast` i `HasFailedExpedition`. `HOOK NOT READY` oznacza brak rejestracji — mod będzie próbować ponownie po załadowaniu mapy.
+3. Zniszcz zwykły przedmiot lootu młotkiem i sprawdź, czy wypada **fizyczne złoto**. Wtedy zniszcz fioletowy przedmiot (nie questowy) i sprawdź **Artifact Coins**. Szukaj wpisów `DESTRUCTION queued` oraz `DROP artifacts` / `DROP gold`.
+4. Na **testowym zapisie** z niecennym ekwipunkiem doprowadź do śmierci. Wpisy `DEATH HOOK`, `IMMEDIATE RESPAWN`, `NEWPAWN`, `EQUIPMENT` pozwolą ustalić, co wykonał serwer.
+5. Po pełnym wipe wróć do windy: powinien pojawić się wpis `RECOVERY run=3 -> 0` i `machine=unlocked`. Sprawdź faktyczny zjazd, nie tylko numer na wyświetlaczu.
 
-1. Otwórz Expedition i sprawdź, czy w `ue4ss\UE4SS.log` jest wpis `[ExpeditionSaver] v0.1.0-alpha loaded`. Jeżeli znajdziesz `hook unavailable`, `poll error` albo `respawn timed out`, zachowaj log.
-2. Z jednym tanim przedmiotem sprawdź respawn po śmierci, pozycję postaci, przedmiot na miejscu i aktualny stan gry.
-3. Osobno przetestuj śmierć całej drużyny i ponowne uruchomienie ekspedycji — nie wystarczy, że sam wyświetlacz pokazuje ostatnie piętro.
-4. W Expedition zbliż się do fioletowego lootu z **wartością Artifact Coins większą od zera**, złap go lub wskaż i naciśnij F7. Sprawdź fizyczny żeton na ziemi oraz to, czy oryginał zniknął. Nie testuj na unikatowym/przedmiocie questowym.
-5. Po sesji prześlij `UE4SS.log`, jeśli któraś funkcja nie zadziała lub itemy znikną.
+**Jeżeli cokolwiek nadal nie działa, prześlij pełen nowy `UE4SS.log` z v0.2.** Samo przejście testów CI nie potwierdza, że funkcje silnika są wywoływane w tej kolejności. W szczególności UI, replikacja sieciowa, serializacja i blokada ekspedycji wymagają rzeczywistych prób.
 
-## Bezpieczeństwo i szczegóły techniczne
+## Testy i źródła
 
-- UE4SS v3: niezależny timer `LoopAsync` przekazuje sprawdzenia na główny wątek za pomocą `ExecuteInGameThread`. Jeśli timer jest niedostępny, działa awaryjny hook animacji.
-- Nie zmienia zachowania poza Expedition; przy braku autorytatywnego `GameModeBase` pozostaje bezczynny.
-- Nie tworzy kopii ekwipunku po śmierci; zapobiega przypadkowej duplikacji, ale nie daje jeszcze gwarancji zachowania wszystkich slotów.
-- Nie niszczy fioletowego przedmiotu, jeżeli nie uda się stworzyć i zainicjalizować fizycznej monety; próbuje wycofać monetę, jeśli niszczenie przedmiotu zawiedzie.
-- Lokalna kopia głębokości: `%LOCALAPPDATA%\Helden\Saved\ExpeditionSaver_slotN.txt`. Jest pomocnicza, a nie zamiennikiem save'u gry.
-- Przedmioty Quest, odmienne reprezentacje fioletowej rzadkości i numeryczne enumy innej wersji gry wymagają oddzielnej walidacji.
-
-## Badania
-
-[Szczegółowy raport o zrzucie klas i funkcji](docs/mapping-analysis-2026-11-20.md).
-
-Testy w `tests/test_expedition.lua` działają w symulowanym API i nie uruchamiają Unreal Engine ani sieci multiplayer.
+- 26 przypadków w `tests/test_expedition.lua`, oraz 2 testy generatora mapowań. Wszystkie dotyczą **symulowanego** API UE4SS.
+- Bazowe mapowanie: `Helden-5.7.4-51494982+++UE5+Release-5.7-1c1a1497.usmap` oraz `UE4SS_ObjectDump.txt` dostarczone 20 listopada 2026.
+- [Raport o typach i hookach](docs/mapping-analysis-2026-11-20.md).
