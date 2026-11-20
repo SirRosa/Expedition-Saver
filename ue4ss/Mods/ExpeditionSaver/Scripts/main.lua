@@ -234,7 +234,7 @@ local S={
     cachedControllers=nil,controllerScanTick=-1,
     coinBaseline={},coinBaselineCycle=0,coinBaselineReady=false,
     currencyCleanup={},claimedDeathCoins={},
-    failureChecks=0,
+    failureChecks=0,storyLootDiagnosticCount=0,
     mode=nil
 }
 local function deathAllowed(ctx)
@@ -1502,6 +1502,22 @@ local function destructionEvent(ctx,origin)
     if not key or S.destructionSeen[key] then return end
     S.rewardEvents=S.rewardEvents+1
     local value=lootValue(a)
+    if gameCtx.isStory and S.storyLootDiagnosticCount<12 then
+        S.storyLootDiagnosticCount=S.storyLootDiagnosticCount+1
+        local cls
+        pcall(function() cls=a:GetClass() end)
+        local nat=get(a,"RandomMoneySpawn")
+        log("STORY LOOT DIAG actor="..key..
+            " class="..tostring(path(cls))..
+            " hp="..tostring(get(stats,"CurrentHealth"))..
+            " inspect="..tostring(inDungeon)..
+            " source="..tostring(value and value.source)..
+            " gold="..tostring(value and value.gold)..
+            " artifacts="..tostring(value and value.artifacts)..
+            " nativeType="..tostring(get(nat,"Type"))..
+            " nativeAmount="..tostring(get(nat,"Amount"))..
+            " chance="..tostring(get(a,"MoneySpawnChance")))
+    end
     if not value then
         if S.rewardEvents<=15 then log("DESTRUCTION "..origin.." "..key.." (no reward data)") end
         return
@@ -1972,6 +1988,20 @@ hook("/Script/Helden.HeldenPhysicsActor:OnHealthModifed",
      safePre("health post",function(context) destructionEvent(context,"health") end))
 hook("/Script/Helden.HeldenPhysicsActor:PlayDestructionEffect_Mulitcast",
      safePre("destruction",function(context) destructionEvent(context,"effect") end))
+-- Story TrashConstruct is a child of HeldenConstructActor. Native collision
+-- disabling is a separate reflected event used by destructible furniture.
+-- Only treat it as a kill when the real StatsComponent health is <= 0,
+-- otherwise ordinary placement/interaction would generate fake rewards.
+hook("/Script/Helden.HeldenConstructActor:DisableCollision_Multicast",
+     safePre("story-destruction-collision",function(context)
+         if S.mode~=0 then return end
+         local actor=unwrap(context)
+         local stats=valid(actor) and get(actor,"StatsComponent")
+         local hp=tonumber(get(stats,"CurrentHealth"))
+         if valid(stats) and hp and hp<=0 then
+             destructionEvent(context,"story-collision")
+         end
+     end))
 local lastSlowPoll=-1000
 local function safePoll(onTimer)
     local started=os.clock()
@@ -2032,4 +2062,4 @@ hook("/Script/Engine.PlayerController:ClientRestart",
          S.coinLedger={}
          S.dropQueue={};S.destructionSeen={}
      end)
-log("v0.7.1 STORY+EXPEDITION active: direct nearest-player rewards (NO PHYSICAL DROP)")
+log("v0.7.2 STORY+EXPEDITION active: reduced scans + Story trash reward fallback")
