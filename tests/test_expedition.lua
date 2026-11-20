@@ -843,18 +843,23 @@ test("verified active damage overlap targets correct co-op player",function()
     assert(secondPawn.Money.Scraps==9,"destroy reward must not touch scrap")
 end)
 
-test("victim actor instigator alone is NOT trustworthy co-op damage proof",function()
+test("victim actor instigator cannot steal payout from uniquely close player",function()
     local t=fixture()
     local second=actor({_name="HeldenPlayerController /Game/P2"})
     local secondPawn=actor({_name="HeldenPlayerCharacter /Game/P2Pawn",
         Money={Gold=5,Artifacts=1,Scraps=9}})
     function second:GetPawn() return secondPawn end
+    function secondPawn:K2_GetActorLocation()
+        return {X=2500,Y=2000,Z=300}
+    end
     t.listing.HeldenPlayerController[2]=second
     function t.loot:GetInstigatorController() return second end
     t.tick(0)
     t.destroyLoot(true)
     t.tick(0)
-    assert(#t.spawned==2,"not enough proof of destruction to award to actor creator")
+    assert(#t.spawned==0,"unique nearby melee player should get direct credit")
+    assert(t.corpse.Money.Gold==100,
+        "victim GetInstigator must not override actual nearby player")
     assert(secondPawn.Money.Gold==5)
 end)
 
