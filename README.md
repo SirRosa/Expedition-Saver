@@ -1,5 +1,48 @@
 # Grain Rot — Expedition Saver
 
+## v0.5.1-alpha — testowa poprawka duplikowania waluty po śmierci
+
+**Problem:** v0.5 przywracał `HeldenCharacter.Money` (Gold, Artifacts, Scraps)
+na nowym pawnie, ale natywna gra mogła pozostawić tę samą walutę w
+`HeldenPhysicsCoin` przy miejscu śmierci. Późniejsze podniesienie monet
+powodowało duplikację.
+
+**Poprawka (host, tylko Expedition):**
+- Zapamiętuje aktorów monet istniejących za życia gracza oraz ostatnie miejsce śmierci.
+- Po pomyślnym przywróceniu całego salda szuka wyłącznie **nowych,
+  świeżych aktorów `HeldenPhysicsCoin`** w promieniu 240 cm od miejsca śmierci,
+  w tym samym świecie.
+- Usuwa tylko **jednoznaczny zestaw monet**, którego suma Gold/Artifacts/Scraps
+  dokładnie odpowiada migawce utraconej waluty. Najpierw sprawdza saldo
+  nowej postaci, następnie zeruje kwotę w aktorze i weryfikuje zapis
+  do `Money`, a dopiero potem niszczy aktor monety.
+- **Nie dotyka `HeldenEquipableItem`, wyposażenia ani zwykłych przedmiotów na ziemi.**
+  Nie usuwa wcześniejszych, odległych, starych ani niejednoznacznych monet.
+- Nie dokłada hooka animacji; monitoring trwa tylko podczas aktywnego
+  problemu, a bazowe skanowanie monet odbywa się co cztery cykle timera.
+
+**Status: testy symulacyjne GitHub Actions przechodzą, działanie w grze niezweryfikowane.**
+Gdy gra używa innej klasy death drop lub rozdziela wypłatę inaczej,
+mod zapisze `DEATH COINS UNRESOLVED` i **nie skasuje niczego w ciemno**.
+Wtedy ryzyko duplikacji nadal istnieje; konieczny będzie log z gry.
+
+Pobierz testową paczkę `ExpeditionSaver-v0.5.1-death-currency-hotfix.zip`
+z [GitHub Actions](https://github.com/SirRosa/Expedition-Saver/actions)
+dla gałęzi `fix/death-currency-duplication`.
+Zainstaluj na hoście po wykonaniu kopii sejwa. Pozostałe funkcje
+v0.5 (respawn, odzyskiwanie itemów, wypłata loot, fizyka monet) pozostają.
+Przy równoczesnym QOL ustaw `InsuranceOnWipe=false`, aby osobny
+mechanizm ubezpieczenia nie dublował **przedmiotów**.
+
+**Test:** weź znane ilości wszystkich trzech walut oraz 1 przedmiot,
+zgiń, sprawdź saldo i ekwipunek po respawnie, następnie wróć do miejsca
+śmierci. Szukaj w `UE4SS.log` wpisów `DEATH COINS tracking`,
+`DEATH COINS matched=...` lub `DEATH COINS UNRESOLVED`.
+Poprawność musi obejmować również brak monet w miejscu śmierci i stan po
+zapisaniu/ponownym wczytaniu.
+
+---
+
 ## v0.5.0-alpha — ochrona ekwipunku, waluty, fizyka monet i skarby
 
 **Wydanie testowe** po analizie rzeczywistego logu `UE4SS(4).log` z v0.4.
