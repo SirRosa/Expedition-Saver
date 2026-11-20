@@ -1065,7 +1065,7 @@ test("missing wallet defers reward without spawning physical currency",function(
     t.destroyLoot(true);t.tick(0)
     assert(#t.spawned==0)
     t.corpse.Money={Gold=80,Artifacts=4,Scraps=17}
-    t.tick(0)
+    for i=1,4 do t.tick(0) end -- bounded queue backoff
     assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
         "queued payout must deliver after the recipient has a wallet")
     assert(#t.spawned==0)
