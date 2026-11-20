@@ -211,6 +211,7 @@ local function resetForSave(ctx,key,slot)
     S.phase=nil;S.pending={};S.coinLedger={}
     S.nextBackupDepth=-1
     S.dropQueue={};S.destructionSeen={}
+    S.nextMachineRepair=0;S.machineRepairAttempts=0
     local time=number(get(ctx.save,"TimePlayed"),0,1000000000)
     local fails=number(get(ctx.save,"DungeonFails"),0,1000000000)
     local recovered=readBackup(slot,time,fails)
@@ -299,7 +300,7 @@ end
 local function captureDeath(char)
     if not CFG.EnableRespawn or not onHost() then return end
     local ctx=game()
-    if not ctx or ctx.phase~=2 then return end
+    if not ctx or not (ctx.phase==2 or (ctx.phase==3 and S.active)) then return end
     local pc
     pcall(function() pc=char:GetController() end)
     if not valid(pc) then return end
@@ -674,7 +675,7 @@ end
 local function isExpeditionDeath()
     if not onHost() then return false end
     local ctx=game()
-    return ctx and ctx.phase==2
+    return ctx and (ctx.phase==2 or (ctx.phase==3 and S.active))
 end
 local function watchDeath(context)
     local character=unwrap(context)
@@ -697,7 +698,9 @@ local function watchNewPawn(context,oldPawn,newPawn)
 end
 local registered={}
 local retries={}
+local knownHooks={}
 local function hook(f,pre,post)
+    if not knownHooks[f] then knownHooks[f]={pre=pre,post=post} end
     if registered[f] then return end
     local now=os.clock()
     if retries[f] and now<retries[f] then return end
@@ -722,24 +725,52 @@ local function safePostBool(cb)
         if ok then return result end
     end
 end
+local function retryHooks()
+    for f,spec in pairs(knownHooks) do
+        if not registered[f] then hook(f,spec.pre,spec.post) end
+    end
+end
 -- Native hooks run on the engine thread; no worker threads modify UObjects.
-hook("/Script/Helden.HeldenCharacter:Die_Auth",watchDeath)
+hook("/Script/Helden.HeldenCharacter:Die_Auth",
+     safePre("Die_Auth",watchDeath))
 hook("/Script/Helden.HeldenPlayerController:OnPlayerKilled",
-     function() end,watchControllerKilled)
+     safePre("OnPlayerKilled",watchControllerKilled),
+     safePre("OnPlayerKilledPost",watchControllerKilled))
 hook("/Script/Helden.HeldenPlayerController:OnNewPawn",
-     function() end,watchNewPawn)
+     function() end,safePre("OnNewPawn",watchNewPawn))
 if CFG.EnableNoPermadeath then
     -- Native post-hook return override, documented in UE4SS RegisterHook.
     -- A false result is intentionally restricted to the Expedition game
     -- mode and authoritative host; it does not touch normal saves.
     hook("/Script/Helden.HeldenGameState:HasFailedExpedition",
         function() end,
-        function(context)
+        safePostBool(function(context)
             local gs=unwrap(context)
             if onHost() and valid(gs) and enum(get(gs,"GameModeType"))==1 then
                 return false
             end
-        end)
+        end))
+    hook("/Script/Helden.HeldenGameState:EndDungeonRunSequence_Multicast",
+        safePre("EndDungeonRunSequence",function(context,statsArg)
+            local gs=unwrap(context)
+            if not onHost() or enum(get(gs,"GameModeType"))~=1 then return end
+            local stats=unwrap(statsArg)
+            if get(stats,"bHaveFailed")==true then
+                S.failed=true;S.recoveryRequired=true
+                local depth=number(get(stats,"DungeonLevel"),0,CFG.MaxDepth)
+                if depth and depth>S.depth then S.depth=depth end
+                log("END RUN failure event; protected depth="..S.depth)
+            end
+        end))
+    hook("/Script/Helden.HeldenElevatorMachine:CanBeInteracted",
+        function() end,
+        safePostBool(function(context)
+            if not S.recoveryRequired or not onHost() then return end
+            local ctx=game()
+            if not ctx or (ctx.phase~=0 and ctx.phase~=3) then return end
+            local machine=first("HeldenElevatorMachine")
+            if valid(machine) and path(machine)==path(unwrap(context)) then return true end
+        end))
 end
 -- Capture the destruction signal from the engine, not keyboard actions.
 -- Health==0 handles direct damage. Multicast catches non-health-based breakage.
@@ -751,6 +782,7 @@ local function safePoll()
     local now=os.clock()
     if S.lastPoll>=0 and now>=S.lastPoll and now-S.lastPoll<CFG.PollSeconds then return end
     S.lastPoll=now
+    retryHooks()
     local ok,err=pcall(poll)
     if not ok and not S.warned then
         S.warned=true;log("poll error: "..tostring(err))
