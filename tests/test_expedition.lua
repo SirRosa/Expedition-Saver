@@ -10,6 +10,8 @@ local function fixture(useCoinNotifications,audioPresent,isClient)
     local now=0
     local coinCallbacks={}
     local audioCommands={}
+    local nativeLoads={}
+    local shellCalls={}
     local registry,hooks,keys,files,logs,spawned={},{},{},{},{},{}
     local counts={clock=0,first=0,all=0,byClass={},respawn=0,teleport=0}
     local gm=actor({_name="GameMode /Game/GM"})
@@ -172,7 +174,7 @@ local function fixture(useCoinNotifications,audioPresent,isClient)
     local clockcb
     local fakeio={open=function(fname,mode)
         if audioPresent and mode=="rb" and
-           (fname:match("respawn_audio%.exe$") or fname:match("respawn%.wav$")) then
+           (fname:match("respawn_audio%.dll$") or fname:match("respawn%.wav$")) then
             return {close=function() end}
         end
         if mode=="r" then
@@ -188,8 +190,20 @@ local function fixture(useCoinNotifications,audioPresent,isClient)
     local env=setmetatable({
         os={clock=function() counts.clock=counts.clock+1;return now end,
             getenv=function() return "C:\\Users\\Tester\\AppData\\Local" end,
-            execute=function(command) audioCommands[#audioCommands+1]=command;return true end},
+            execute=function(command)
+                shellCalls[#shellCalls+1]=command
+                error("os.execute must never run for in-game audio")
+            end},
         io=fakeio,
+        package={loadlib=function(dll,entry)
+            nativeLoads[#nativeLoads+1]={dll=dll,entry=entry}
+            assert(dll:match("respawn_audio%.dll$"),
+                "only trusted respawn_audio.dll may be loaded")
+            assert(entry=="luaopen_RespawnSound")
+            return function()
+                audioCommands[#audioCommands+1]="PlaySoundW(SND_ASYNC)"
+            end
+        end},
         print=function(msg) logs[#logs+1]=msg end,
         FindFirstOf=function(cls) counts.first=counts.first+1;return registry[cls] end,
         FindAllOf=function(cls)
@@ -222,6 +236,7 @@ local function fixture(useCoinNotifications,audioPresent,isClient)
         world=world,registry=registry,listing=listing,spawned=spawned,
         hooks=hooks,keys=keys,logs=logs,files=files,counts=counts,
         coinCallbacks=coinCallbacks,audioCommands=audioCommands,
+        nativeLoads=nativeLoads,shellCalls=shellCalls,
         tick=function(dt) now=now+(dt or 0.7);clockcb() end,
         killed=function()
             local h=hooks["/Script/Helden.HeldenCharacter:Die_Auth"]
@@ -1418,8 +1433,11 @@ test("respawn sound fires once after successful native respawn",function()
     for i=1,4 do t.tick(0) end
     assert(t.newPawn.location and t.newPawn.CharacterStats.CurrentHealth==120)
     assert(#t.audioCommands==1,"successful native respawn should play exactly once")
-    local cmd=t.audioCommands[1]
-    assert(cmd:find("respawn_audio.exe",1,true) and cmd:find("respawn.wav",1,true))
+    assert(t.audioCommands[1]=="PlaySoundW(SND_ASYNC)")
+    assert(#t.nativeLoads==1,
+        "native DLL should load once at startup, not on death")
+    assert(#t.shellCalls==0,
+        "no os.execute/CMD may be used during respawn audio")
     for i=1,12 do t.tick(0) end
     assert(#t.audioCommands==1,"sound should not repeat every poll")
 end)
@@ -1601,6 +1619,67 @@ test("unknown local controller status never plays audio for remote pawn",functio
     assert(t.newPawn.CharacterStats.CurrentHealth==120)
     assert(#t.audioCommands==0,
         "audio must require an explicitly locally controlled PC")
+end)
+
+test("audio playback is zero-process WinMM and never runs CMD or os.execute",function()
+    local t=fixture(false,true)
+    assert(#t.nativeLoads==1,"preload respawn DLL at startup")
+    assert(t.nativeLoads[1].dll:match("respawn_audio%.dll$"))
+    t.tick(0);t.killed()
+    for i=1,6 do t.tick(0) end
+    assert(#t.audioCommands==1)
+    assert(t.audioCommands[1]=="PlaySoundW(SND_ASYNC)")
+    assert(#t.shellCalls==0,
+        "regression: visible cmd.exe was caused by os.execute")
+end)
+
+test("client OnNewPawn immediately plays native DLL without waiting a poll tick",function()
+    local t=fixture(false,true,true)
+    t.tick(0)
+    t.corpse.CharacterStats.CurrentHealth=0
+    t.corpse.CharacterState=1
+    t.tick(0)
+    local h=t.hooks["/Script/Helden.HeldenPlayerController:OnNewPawn"]
+    t.newPawn.CharacterStats.CurrentHealth=120
+    h.post(t.pc,nil,t.newPawn)
+    assert(#t.audioCommands==1,
+        "OnNewPawn should play immediately, not wait several seconds")
+    assert(#t.shellCalls==0)
+    t.tick(0)
+    assert(#t.audioCommands==1,"no duplicate on timer")
+end)
+
+test("client OnRep alive immediately plays DLL on existing pawn revive",function()
+    local t=fixture(false,true,true)
+    t.tick(0)
+    t.corpse.CharacterStats.CurrentHealth=0
+    t.corpse.CharacterState=1
+    local h=t.hooks["/Script/Helden.HeldenCharacter:OnRep_CharacterState"]
+    h.pre(t.corpse)
+    t.corpse.CharacterState=0
+    t.corpse.CharacterStats.CurrentHealth=120
+    h.pre(t.corpse)
+    assert(#t.audioCommands==1,
+        "replicated revival should play before next poll")
+    assert(#t.shellCalls==0)
+    t.tick(0)
+    assert(#t.audioCommands==1)
+end)
+
+test("new sound library is loaded exactly once across multiple client deaths",function()
+    local t=fixture(false,true,true)
+    t.tick(0)
+    for i=1,2 do
+        t.corpse.CharacterStats.CurrentHealth=0
+        t.corpse.CharacterState=1
+        t.tick(0)
+        t.corpse.CharacterState=0
+        t.corpse.CharacterStats.CurrentHealth=120
+        t.tick(0)
+    end
+    assert(#t.audioCommands==2,"one playback for each real respawn")
+    assert(#t.nativeLoads==1,"do not reload DLL for every death")
+    assert(#t.shellCalls==0)
 end)
 
 print("ALL TESTS PASSED ("..passed..")")
