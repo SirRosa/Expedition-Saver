@@ -363,7 +363,7 @@ local function queuePlayerDeath(pc,char,snapshot,reason)
     if not CFG.EnableRespawn or not onHost() then return false end
     local ctx=game()
     if not ctx or not (ctx.phase==2 or (ctx.phase==3 and (S.active or ctx.failed))) then return false end
-    if not valid(pc) or not valid(char) then return false end
+    if not valid(pc) or (not valid(char) and snapshot==nil) then return false end
     local key=path(pc)
     if not key or S.pending[key] then return false end
     local player=false
@@ -417,7 +417,8 @@ local function monitorPlayers(ctx)
             local health=tonumber(get(stats,"CurrentHealth"))
             local state=enum(get(char,"CharacterState"))
             local isSoul=valid(soul) and valid(pawn) and path(soul)==path(pawn)
-            local dead=(state==1 or (health and health<=0) or isSoul)
+            local dead=(state==1 or (health and health<=0) or isSoul or
+                (tracking.alive and ctx.phase==3 and ctx.failed))
             local activeCharacter=valid(char) and not dead and health and health>0
             if tracking.lastState~=state or tracking.lastHealth~=nil and
                     health and ((tracking.lastHealth>0)~=(health>0)) then
@@ -438,9 +439,9 @@ local function monitorPlayers(ctx)
                 end
             elseif dead and not tracking.dead then
                 tracking.dead=true
-                if tracking.alive and valid(tracking.lastPawn) then
+                if tracking.alive then
                     local ok=queuePlayerDeath(pc,tracking.lastPawn,
-                        tracking.gear,"poll: CharacterState/Health/Soul")
+                        tracking.gear,"poll: CharacterState/Health/Soul/failed run")
                     if ok then S.observedDeaths=S.observedDeaths+1 end
                 else
                     log("PLAYER DEAD but no prior alive snapshot; waiting for native event")
@@ -1106,6 +1107,23 @@ local function immediatelyRequestRespawn(context)
     log("IMMEDIATE RESPAWN on OnPlayerKilled post -> "..tostring(ok)..
         (ok and "" or ": "..tostring(err)))
 end
+local function watchReplicatedDeadState(context)
+    local character=unwrap(context)
+    if not valid(character) or enum(get(character,"CharacterState"))~=1 then return end
+    for _,pc in ipairs(all("HeldenPlayerController")) do
+        if valid(pc) then
+            local key=path(pc)
+            local record=S.players[key]
+            local old=record and record.lastPawn
+            if record and record.alive and valid(old) and
+               path(old)==path(character) then
+                queuePlayerDeath(pc,character,record.gear,
+                    "OnRep_CharacterState Dead")
+                return
+            end
+        end
+    end
+end
 local function watchNewPawn(context,oldPawn,newPawn)
     local pc=unwrap(context)
     local pawn=unwrap(newPawn)
@@ -1152,6 +1170,8 @@ end
 -- Native hooks run on the engine thread; no worker threads modify UObjects.
 hook("/Script/Helden.HeldenCharacter:Die_Auth",
      safePre("Die_Auth",watchDeath))
+hook("/Script/Helden.HeldenCharacter:OnRep_CharacterState",
+     safePre("OnRep_CharacterState",watchReplicatedDeadState))
 hook("/Script/Helden.HeldenPlayerController:OnPlayerKilled",
      safePre("OnPlayerKilled",watchControllerKilled),
      safePre("OnPlayerKilledPost",function(context,...)
