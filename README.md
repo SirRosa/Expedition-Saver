@@ -1,5 +1,21 @@
 # Grain Rot — Expedition Saver
 
+## v0.7.1 — bez fizycznego dropu walut za meble (TEST)
+
+**W Story Mode i Expedition wszystkie Gold i Artifact Coins z niszczenia mebli są wpłacane bezpośrednio do portfela gracza.** Żaden przypadek nie wywołuje `SpawnActor` dla monet ani nie uruchamia ich fizyki.
+
+Kolejność wyboru odbiorcy:
+1. Gracz jednoznacznie wskazany przez zdarzenie trafienia.
+2. Jeden jednoznacznie rozpoznany atakujący bronią.
+3. **Gracz znajdujący się najbliżej zniszczonego obiektu** — bez limitu zasięgu i bez tolerancji odległości, nawet gdy różnica wynosi 1 mm lub mniej.
+
+Jeżeli odległość jest *dokładnie* taka sama, wygrywa stabilna kolejność pełnych nazw kontrolerów. Jeżeli brak dostępnej postaci lub odczyt pozycji/portfela jest chwilowo niemożliwy, nagroda pozostaje w kolejce i mod ponawia próbę. **Nie zamienia jej na fizyczny drop.** Log `DIRECT REWARD PENDING` oznacza zaległą wypłatę.
+
+To dotyczy dodatkowych monet i żetonów przy niszczeniu mebli. **Natywny drop scrapu oraz osobna procedura naprawy walut po śmierci nie zostały zmienione.** Nie są niszczone przedmioty ani ich fizyczne reprezentacje.
+
+CI sprawdza testy Lua/UE4SS (w tym różnicę 1 mm, remis, równoczesne ataki, chwilowy brak portfela, Story Mode). W prawdziwej grze wynik wymaga potwierdzenia.
+
+
 ## v0.7.0 — Story + Expedition death/rewards (TEST BUILD)
 
 **This build handles Story (EHeldenGameMode.Default=0) AND Expedition (1).**
