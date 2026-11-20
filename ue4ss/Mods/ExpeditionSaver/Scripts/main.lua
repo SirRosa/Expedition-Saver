@@ -237,6 +237,7 @@ end
 local function resetForSave(ctx,key,slot)
     local oldSlot=S.slot
     local oldPending=S.pending
+    local oldPlayers=S.players
     local preserve=oldSlot==slot and (S.recoveryRequired or S.active or next(oldPending)~=nil)
     local oldDepth,oldSeed,oldOffset,oldActive,oldFailed=
         S.depth,S.highestSeed,S.offset,S.active,S.failed
@@ -248,6 +249,7 @@ local function resetForSave(ctx,key,slot)
     S.active=preserve and oldActive or false
     S.failed=preserve and oldFailed or false
     S.phase=nil;S.pending=preserve and oldPending or {};S.coinLedger={}
+    S.players=preserve and oldPlayers or {}
     S.nextBackupDepth=-1
     S.dropQueue={};S.destructionSeen={}
     S.nextMachineRepair=0;S.machineRepairAttempts=0
@@ -351,30 +353,97 @@ local function currentPawn(pc)
     local ok,pawn=pcall(function() return pc:GetPawn() end)
     if ok and valid(pawn) then return pawn end
 end
-local function captureDeath(char)
-    if not CFG.EnableRespawn or not onHost() then return end
+-- In real Expedition runs the native Die_Auth and Blueprint
+-- OnPlayerKilled hook were NEVER called (observed v0.3 log).
+-- Monitor actual controller/pawn state and preserve inventory BEFORE death.
+local function queuePlayerDeath(pc,char,snapshot,reason)
+    if not CFG.EnableRespawn or not onHost() then return false end
     local ctx=game()
-    if not ctx or not (ctx.phase==2 or (ctx.phase==3 and (S.active or ctx.failed))) then return end
-    local pc
-    pcall(function() pc=char:GetController() end)
-    if not valid(pc) then return end
+    if not ctx or not (ctx.phase==2 or (ctx.phase==3 and (S.active or ctx.failed))) then return false end
+    if not valid(pc) or not valid(char) then return false end
     local key=path(pc)
-    if not key or S.pending[key] then return end
-    -- Ignore NPC/AI deaths even if they expose a Controller method.
-    local isPlayer=false
-    for _,playerController in ipairs(all("HeldenPlayerController")) do
-        if path(playerController)==key then isPlayer=true;break end
+    if not key or S.pending[key] then return false end
+    local player=false
+    for _,candidate in ipairs(all("HeldenPlayerController")) do
+        if path(candidate)==key then player=true;break end
     end
-    if not isPlayer then return end
-    local inv=gearOf(char)
-    local entry={controller=pc,oldChar=char,gear=inv,
+    if not player then return false end
+    local inv=snapshot or gearOf(char)
+    S.pending[key]={controller=pc,oldChar=char,gear=inv,
         started=os.clock(),ageTicks=0,attempts=0,nextRequestTick=0,
         spawned=nil,delivered=false}
-    S.pending[key]=entry
     S.deathEvents=S.deathEvents+1
-    log("DEATH HOOK player="..key.." phase="..ctx.phase..
-        " retained="..#inv.." awaiting server respawn")
+    log("PLAYER DEATH queued from "..tostring(reason).." controller="..key..
+        " oldPawn="..tostring(path(char)).." retained="..#inv..
+        " phase="..ctx.phase)
+    return true
 end
+local function captureDeath(char)
+    if not valid(char) then return end
+    local pc
+    pcall(function() pc=char:GetController() end)
+    if valid(pc) then queuePlayerDeath(pc,char,nil,"Die_Auth") end
+end
+local function monitorPlayers(ctx)
+    if not CFG.EnableRespawn or not (ctx.phase==2 or
+        (ctx.phase==3 and (ctx.failed or S.active))) then return end
+    for _,pc in ipairs(all("HeldenPlayerController")) do
+        if valid(pc) then
+            local key=path(pc)
+            local tracking=S.players[key]
+            if not tracking then
+                tracking={alive=false,dead=false,lastPawn=nil,gear={},
+                    snapshotCycle=0,lastState=nil,lastHealth=nil}
+                S.players[key]=tracking
+            end
+            local pawn=currentPawn(pc)
+            local soul=get(pc,"SoulCharacter")
+            local last=get(pc,"LastPlayerChar")
+            local char
+            if valid(pawn) and valid(get(pawn,"CharacterStats")) then
+                char=pawn
+            elseif valid(last) and valid(get(last,"CharacterStats")) then
+                char=last
+            elseif valid(tracking.lastPawn) then
+                char=tracking.lastPawn
+            end
+            local stats=char and get(char,"CharacterStats")
+            local health=tonumber(get(stats,"CurrentHealth"))
+            local state=enum(get(char,"CharacterState"))
+            local isSoul=valid(soul) and valid(pawn) and path(soul)==path(pawn)
+            local dead=(state==1 or (health and health<=0) or isSoul)
+            local activeCharacter=valid(char) and not dead and health and health>0
+            if tracking.lastState~=state or tracking.lastHealth~=nil and
+                    health and ((tracking.lastHealth>0)~=(health>0)) then
+                log("PLAYER STATE controller="..tostring(key)..
+                    " state="..tostring(state).." hp="..tostring(health)..
+                    " soulPawn="..tostring(isSoul).." run="..ctx.phase)
+            end
+            tracking.lastState=state
+            tracking.lastHealth=health
+            if activeCharacter then
+                tracking.lastPawn=char
+                tracking.alive=true
+                tracking.dead=false
+                tracking.snapshotCycle=tracking.snapshotCycle+1
+                if tracking.snapshotCycle>=4 then
+                    tracking.gear=gearOf(char)
+                    tracking.snapshotCycle=0
+                end
+            elseif dead and not tracking.dead then
+                tracking.dead=true
+                if tracking.alive and valid(tracking.lastPawn) then
+                    local ok=queuePlayerDeath(pc,tracking.lastPawn,
+                        tracking.gear,"poll: CharacterState/Health/Soul")
+                    if ok then S.observedDeaths=S.observedDeaths+1 end
+                else
+                    log("PLAYER DEAD but no prior alive snapshot; waiting for native event")
+                end
+            end
+        end
+    end
+end
+
 local function respawnLocation()
     local lift=first("HeldenDungeonElevator")
     if not valid(lift) then return nil end
@@ -822,6 +891,7 @@ local function poll()
     local key=path(ctx.save)
     if S.slot~=slot or S.saveKey~=key then resetForSave(ctx,key,slot) end
     keepExpedition(ctx)
+    monitorPlayers(ctx)
     processDeaths(ctx)
     repairElevator(ctx)
     processDropQueue()
