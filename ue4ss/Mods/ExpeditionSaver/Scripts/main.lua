@@ -1311,7 +1311,8 @@ local function selectDestroyer(actor,origin)
     -- When only one living player is close enough to physically strike the
     -- actor, attribute a lethal health event to that player. Never pick
     -- simply the nearest of two nearby teammates.
-    if players>1 and closeCount==1 and valid(close) then
+    if players>1 and eligible>=2 and closeCount==1 and
+       valid(close) and not (recent and hit.ambiguous) then
         return close,"unique-close-melee"
     end
     return nil,players>1 and "unverified-coop" or "no-owner"
