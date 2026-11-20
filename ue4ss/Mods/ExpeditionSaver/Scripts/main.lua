@@ -27,6 +27,8 @@ local CFG = {
     CoinCriticalEveryPolls = 4, -- keep frequent baseline checks near death
     GearFullScanPolls = 30, -- world-wide inventory scan only every 9s
     PlayerControllerScanPolls = 100, -- cache live controllers for up to 30s; invalidate on new pawn
+    UseCoinObjectTracking = true, -- UE4SS NotifyOnNewObject avoids periodic coin registry scans
+    RecentCoinMaxReferences = 512,
     DeathCoinScanEveryPolls = 8, -- 2.4s between full scans while recovering
     RespawnDelaySeconds = 0.15,
     RespawnRetrySeconds = 1.5,
@@ -233,6 +235,7 @@ local S={
     gearScanTick=-1,gearScanObjects={},
     cachedControllers=nil,controllerScanTick=-1,
     coinBaseline={},coinBaselineCycle=0,coinBaselineReady=false,
+    coinEventsActive=false,createdCoinActors={},
     currencyCleanup={},claimedDeathCoins={},
     failureChecks=0,storyLootDiagnosticCount=0,
     mode=nil
@@ -302,6 +305,7 @@ local function resetForSave(ctx,key,slot)
     S.recoveries=preserve and oldRecoveries or {}
     S.currencyCleanup=preserve and oldCurrencyCleanup or {}
     S.coinBaseline={};S.coinBaselineCycle=0;S.coinBaselineReady=false
+    S.createdCoinActors={}
     S.claimedDeathCoins={}
     S.damageHits={};S.attackIntents={};S.pollCycle=0
     S.gearScanTick=-1;S.gearScanObjects={}
@@ -431,6 +435,33 @@ local function snapshotExistingCoins()
     S.coinBaselineReady=true
 end
 
+-- Currency actors spawned during play are recorded on construction. This
+-- avoids a 9-second periodic scan through the global UObject registry in
+-- Story Mode. The ONE initial level baseline remains, and we never perform
+-- any refund or deletion in this callback.
+local function watchNewCoin(coin)
+    coin=unwrap(coin)
+    if not valid(coin) then return end
+    local record={ref=coin,tick=S.pollCycle}
+    local ledger=S.createdCoinActors
+    ledger[#ledger+1]=record
+    if #ledger>CFG.RecentCoinMaxReferences then table.remove(ledger,1) end
+    local inDeath=false
+    for _,tracking in pairs(S.players) do
+        local pawn=tracking.lastPawn
+        local stat=valid(pawn) and get(pawn,"CharacterStats")
+        local health=tonumber(get(stat,"CurrentHealth"))
+        if (health and health<=0) or tracking.dead then
+            inDeath=true;break
+        end
+    end
+    -- Do not classify a newly created death drop as pre-existing currency.
+    if not inDeath then
+        local id=path(coin)
+        if id then S.coinBaseline[id]=true end
+    end
+end
+
 -- Native death coins can remain in the dungeon after the wallet is restored.
 -- Only zero and destroy a *complete exact match* of new physical coins close
 -- to the death point, after checking the new player already owns the money.
@@ -459,7 +490,22 @@ local function processCurrencyCleanup()
             if funded and (job.ticks==1 or
                job.ticks%CFG.DeathCoinScanEveryPolls==0) then
                 local newCoins=0
-                for _,coin in ipairs(all("HeldenPhysicsCoin")) do
+                -- One immediate native registry scan; subsequent sweeps
+                -- use the lightweight newly-created actor queue. Retain
+                -- occasional fallbacks if the game bypasses notifications.
+                local candidates
+                if S.coinEventsActive and job.ticks~=1 and
+                   job.ticks~=8 and job.ticks~=40 then
+                    candidates={}
+                    for _,rec in ipairs(S.createdCoinActors) do
+                        if rec.tick>=job.startCycle-2 then
+                            candidates[#candidates+1]=rec.ref
+                        end
+                    end
+                else
+                    candidates=all("HeldenPhysicsCoin")
+                end
+                for _,coin in ipairs(candidates) do
                     if valid(coin) then
                         local id=path(coin)
                         if id and not job.oldCoins[id] and
@@ -780,10 +826,15 @@ local function monitorPlayers(ctx)
     end
     -- One registry scan at most every 4 poll cycles, regardless of player count.
     if anyAlive then
+        -- NotifyOnNewObject tracks coin creation without a FindAllOf sweep.
+        -- Take just ONE initial level snapshot to index preexisting coins.
+        -- On UE4SS builds without object notifications, retain the older
+        -- health-adaptive periodic fallback for native death deduplication.
         S.coinBaselineCycle=S.coinBaselineCycle+1
         local period=anyDanger and CFG.CoinCriticalEveryPolls or
             CFG.CoinBaselineEveryPolls
-        if not S.coinBaselineReady or S.coinBaselineCycle>=period then
+        if not S.coinBaselineReady or
+           (not S.coinEventsActive and S.coinBaselineCycle>=period) then
             S.coinBaselineCycle=0
             snapshotExistingCoins()
         end
@@ -868,7 +919,9 @@ local function collectAtElevator(entry,dest,pawn)
         S.currencyCleanup[key]={
             pawn=pawn,money=entry.money,at=entry.deathPos,
             oldCoins=entry.oldCoins or {},world=entry.deathWorld,ticks=0,
-            controller=key,oldChar=path(entry.oldChar),removed={Gold=0,Artifacts=0,Scraps=0},
+            controller=key,oldChar=path(entry.oldChar),
+            startCycle=S.pollCycle,
+            removed={Gold=0,Artifacts=0,Scraps=0},
             cleared=0,rejected=0
         }
         log("DEATH COINS tracking death location "..
@@ -2037,6 +2090,19 @@ end
 -- Persistent game-thread polling is crucial: when the final player dies,
 -- BlueprintUpdateAnimation may stop entirely. UE4SS v3 has LoopAsync and
 -- ExecuteInGameThread; v4 also has a direct game-thread timer.
+-- NotifyOnNewObject is a genuine UE4SS API. It is registered once,
+-- does not poll the UObject array, and fires only for newly constructed
+-- HeldenPhysicsCoin (including blueprint-derived coin classes).
+if CFG.UseCoinObjectTracking and type(NotifyOnNewObject)=="function" then
+    local ok,err=pcall(function()
+        NotifyOnNewObject("/Script/Helden.HeldenPhysicsCoin",
+            function(coin) pcall(watchNewCoin,coin) end)
+    end)
+    S.coinEventsActive=ok
+    log(ok and "coin creation tracking active; periodic baseline scans disabled"
+        or ("coin notification unavailable: "..tostring(err)))
+end
+
 local scheduled=false
 if type(LoopInGameThreadWithDelay)=="function" then
     local ok=pcall(function()
