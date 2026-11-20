@@ -816,6 +816,26 @@ local function getDataSingleton()
         end
     end
 end
+local function treasureDataKey(actor,ds)
+    if not ds then return nil end
+    local container=get(ds,"PhysTreasureContainer")
+    if not valid(container) then return nil end
+    local root=get(actor,"RootMesh")
+    local mesh=get(root,"StaticMesh")
+    if not valid(mesh) and valid(root) then
+        pcall(function() mesh=root:GetStaticMesh() end)
+    end
+    if not valid(mesh) then return nil end
+    local match=path(mesh)
+    local key
+    each(get(container,"TreasureData"),function(row)
+        local rowMesh=get(row,"StaticMesh")
+        if not key and valid(rowMesh) and path(rowMesh)==match then
+            key=get(row,"DataName")
+        end
+    end)
+    return key
+end
 local function lootValue(actor)
     if not valid(actor) then return nil end
     local id=path(actor) or ""
@@ -858,21 +878,56 @@ local function lootValue(actor)
             or "Parsed_ScrapValue_Common"
         local value=get(struct,key)
         if value then
-            return {gold=number(get(value,"Gold"),0,CFG.MaxCoinsPerDrop) or 0,
-                artifacts=number(get(value,"Artifacts"),0,CFG.MaxCoinsPerDrop) or 0,
-                source="construct-asset-data"}
+            local gold=number(get(value,"Gold"),0,CFG.MaxCoinsPerDrop) or 0
+            local artifacts=number(get(value,"Artifacts"),0,CFG.MaxCoinsPerDrop) or 0
+            if gold>0 or artifacts>0 then
+                return {gold=gold,artifacts=artifacts,
+                    source="construct-asset-data",row=asName(get(struct,"DataName"))}
+            end
+            inspectedZero={gold=0,artifacts=0,source="construct-zero"}
         end
     end
-    -- Non-construct physical loot uses PhysActorData, where QOL multiplies
-    -- Parsed_ScrapReward.Gold. No additional multiplier is applied here.
-    local n=get(actor,"StatsDataName") or get(actor,"ConstructDataName")
-    if not n then return inspectedZero end
-    local row=rowOf(get(ds,"PhysActorDataTable"),n)
-    local value=row and get(row,"Parsed_ScrapReward")
-    if not value then return inspectedZero end
-    return {gold=number(get(value,"Gold"),0,CFG.MaxCoinsPerDrop) or 0,
-        artifacts=number(get(value,"Artifacts"),0,CFG.MaxCoinsPerDrop) or 0,
-        source="physical-table"}
+    -- IMPORTANT: generic BP_DefaultPhysTreasure often has zero Construct
+    -- scrap value. The actual reward lives in PhysActorData or in
+    -- PhysTreasureContainer.TreasureData keyed by its current mesh.
+    local candidates={}
+    local seen={}
+    local function candidate(value,source)
+        local n=asName(value)
+        if n and n~="None" and n~="" and not seen[n] then
+            seen[n]=true
+            candidates[#candidates+1]={key=value,name=n,source=source}
+        end
+    end
+    candidate(get(actor,"StatsDataName"),"StatsDataName")
+    candidate(get(actor,"ConstructDataName"),"ConstructDataName")
+    candidate(get(get(actor,"InitConAsset"),"DataName"),"InitConAsset")
+    candidate(get(get(actor,"SetupConstructAsset"),"DataName"),"SetupConstructAsset")
+    candidate(get(construct,"DataName"),"GetConstructAsset")
+    candidate(treasureDataKey(actor,ds),"TreasureData.StaticMesh")
+    local tableObject=get(ds,"PhysActorDataTable")
+    for _,entry in ipairs(candidates) do
+        local row=rowOf(tableObject,entry.key)
+        local value=row and get(row,"Parsed_ScrapReward")
+        if value then
+            local gold=number(get(value,"Gold"),0,CFG.MaxCoinsPerDrop) or 0
+            local artifacts=number(get(value,"Artifacts"),0,CFG.MaxCoinsPerDrop) or 0
+            if gold>0 or artifacts>0 then
+                return {gold=gold,artifacts=artifacts,
+                    source="physical-table:"..entry.source,row=entry.name}
+            end
+        end
+    end
+    if normalized:find("treasure",1,true) and
+        (S.rawDestroyEvents or 0)<2000 then
+        local names={}
+        for _,entry in ipairs(candidates) do names[#names+1]=entry.name end
+        log("TREASURE REWARD UNRESOLVED actor="..id..
+            " quality="..tostring(enum(get(actor,"ConstructQuality")))..
+            " candidates="..table.concat(names,",")..
+            " inspect="..tostring(inspectedZero~=nil))
+    end
+    return inspectedZero
 end
 local function destructionEvent(ctx,origin)
     S.rawDestroyEvents=S.rawDestroyEvents+1
