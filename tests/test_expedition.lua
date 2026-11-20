@@ -6,9 +6,10 @@ local function actor(fields)
     function a:GetFullName() return self._name or tostring(self) end
     return a
 end
-local function fixture(useCoinNotifications)
+local function fixture(useCoinNotifications,audioPresent)
     local now=0
     local coinCallbacks={}
+    local audioCommands={}
     local registry,hooks,keys,files,logs,spawned={},{},{},{},{},{}
     local counts={clock=0,first=0,all=0,byClass={},respawn=0,teleport=0}
     local gm=actor({_name="GameMode /Game/GM"})
@@ -166,6 +167,10 @@ local function fixture(useCoinNotifications)
         BP_ExpeditionFailed_Actor_C={barrier},HeldenPhysicsCoin={}}
     local clockcb
     local fakeio={open=function(fname,mode)
+        if audioPresent and mode=="rb" and
+           (fname:match("respawn_audio%.exe$") or fname:match("respawn%.wav$")) then
+            return {close=function() end}
+        end
         if mode=="r" then
             local v=files[fname]
             if not v then return nil end
@@ -178,7 +183,8 @@ local function fixture(useCoinNotifications)
     end}
     local env=setmetatable({
         os={clock=function() counts.clock=counts.clock+1;return now end,
-            getenv=function() return "C:\\Users\\Tester\\AppData\\Local" end},
+            getenv=function() return "C:\\Users\\Tester\\AppData\\Local" end,
+            execute=function(command) audioCommands[#audioCommands+1]=command;return true end},
         io=fakeio,
         print=function(msg) logs[#logs+1]=msg end,
         FindFirstOf=function(cls) counts.first=counts.first+1;return registry[cls] end,
@@ -200,6 +206,7 @@ local function fixture(useCoinNotifications)
             assert(ms==300);clockcb=callback;return 1
         end,
         ExecuteInGameThread=function(callback) callback() end,
+        ExecuteAsync=function(callback) callback() end,
     },{__index=_G})
     env._G=env
     assert(loadfile(MAIN,"t",env))()
@@ -210,7 +217,7 @@ local function fixture(useCoinNotifications)
         pc=pc,corpse=corpse,newPawn=newPawn,item=item,loot=loot,
         world=world,registry=registry,listing=listing,spawned=spawned,
         hooks=hooks,keys=keys,logs=logs,files=files,counts=counts,
-        coinCallbacks=coinCallbacks,
+        coinCallbacks=coinCallbacks,audioCommands=audioCommands,
         tick=function(dt) now=now+(dt or 0.7);clockcb() end,
         killed=function()
             local h=hooks["/Script/Helden.HeldenCharacter:Die_Auth"]
@@ -1396,6 +1403,60 @@ test("nonlethal health spam does not run expensive destruction lookup",function(
     h.post(t.loot);t.tick(0)
     assert(t.corpse.Money.Gold==100,
         "the actual zero-HP event must still award the furniture currency")
+end)
+
+test("respawn sound fires once after successful native respawn",function()
+    local t=fixture(false,true)
+    t.tick(0);t.killed()
+    assert(#t.audioCommands==0,"death should not play respawn sound")
+    t.tick(0)
+    assert(#t.audioCommands==0,"native respawn request must not play early")
+    for i=1,4 do t.tick(0) end
+    assert(t.newPawn.location and t.newPawn.CharacterStats.CurrentHealth==120)
+    assert(#t.audioCommands==1,"successful native respawn should play exactly once")
+    local cmd=t.audioCommands[1]
+    assert(cmd:find("respawn_audio.exe",1,true) and cmd:find("respawn.wav",1,true))
+    for i=1,12 do t.tick(0) end
+    assert(#t.audioCommands==1,"sound should not repeat every poll")
+end)
+
+test("respawn sound fires once when original pawn is revived as fallback",function()
+    local t=fixture(false,true)
+    function t.corpse:K2_TeleportTo(at) self.location=at;return true end
+    function t.pc:Possess(pawn) self._pawn=pawn end
+    function t.pc:ClientRestart(pawn) self._clientRestarted=true end
+    function t.corpse:OnRep_CharacterState() end
+    t.tick(0)
+    t.corpse.CharacterState=1;t.corpse.CharacterStats.CurrentHealth=0
+    t.pc.RespawnCharacter_Server=function(self)
+        t.counts.respawn=t.counts.respawn+1
+    end
+    for i=1,20 do t.tick(0) end
+    assert(t.pc:GetPawn()==t.corpse and t.corpse.CharacterStats.CurrentHealth==120)
+    assert(#t.audioCommands==1,"fallback revival should play exactly once")
+end)
+
+test("respawn sound does not play on remote controller",function()
+    local t=fixture(false,true)
+    function t.pc:IsLocalController() return false end
+    t.tick(0);t.killed()
+    for i=1,6 do t.tick(0) end
+    assert(t.newPawn.CharacterStats.CurrentHealth==120)
+    assert(#t.audioCommands==0,"host must not play local WAV for remote client")
+end)
+
+test("respawn sound missing files is fail-soft and does not block respawn",function()
+    local t=fixture(false,false)
+    t.tick(0);t.killed()
+    for i=1,6 do t.tick(0) end
+    assert(t.newPawn.CharacterStats.CurrentHealth==120 and t.newPawn.location,
+        "missing audio helper/asset should never interfere with gameplay")
+    assert(#t.audioCommands==0)
+    local warning=0
+    for _,line in ipairs(t.logs) do
+        if line:find("RESPAWN SOUND missing",1,true) then warning=warning+1 end
+    end
+    assert(warning==1,"warn only once for missing audio asset")
 end)
 
 print("ALL TESTS PASSED ("..passed..")")
