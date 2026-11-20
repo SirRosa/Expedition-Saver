@@ -19,6 +19,9 @@ local CFG = {
     DeathCoinScanTicks = 40, -- 12 seconds on the 300ms engine timer
     EnableNoPermadeath = true,
     EnablePhysicalCoins = true,
+    DirectFurnitureRewards = true, -- wallet credit to proven destroyer
+    SlowPollWarnSeconds = 0.035,
+    CoinBaselineEveryPolls = 16, -- 4.8 seconds, reduce expensive global scans
     RespawnDelaySeconds = 0.15,
     RespawnRetrySeconds = 1.5,
     MaxRespawnRequests = 3,
@@ -671,7 +674,7 @@ local function monitorPlayers(ctx)
     -- One registry scan at most every 4 poll cycles, regardless of player count.
     if anyAlive then
         S.coinBaselineCycle=S.coinBaselineCycle+1
-        if S.coinBaselineCycle>=4 then
+        if S.coinBaselineCycle>=CFG.CoinBaselineEveryPolls then
             S.coinBaselineCycle=0
             snapshotExistingCoins()
         end
@@ -1125,6 +1128,59 @@ local function lootValue(actor)
     end
     return inspectedZero
 end
+-- Death/physics hooks do not expose a damage instigator. Credit a wallet
+-- only for a controller explicitly referenced by the actor OR when there is
+-- exactly one eligible player. Never guess by proximity in multiplayer.
+local function selectDestroyer(actor)
+    if not CFG.DirectFurnitureRewards then return nil,"disabled" end
+    local instigator
+    pcall(function() instigator=actor:GetInstigatorController() end)
+    local instigatorId=valid(instigator) and path(instigator) or nil
+    local sole,chosen,count=nil,nil,0
+    for _,pc in ipairs(all("HeldenPlayerController")) do
+        if valid(pc) then
+            local pawn=currentPawn(pc)
+            if valid(pawn) and get(pawn,"Money") then
+                count=count+1
+                if count==1 then sole=pawn end
+                if instigatorId and path(pc)==instigatorId then chosen=pawn end
+            end
+        end
+    end
+    if valid(chosen) then return chosen,"instigator" end
+    if count==1 and valid(sole) then return sole,"single-player" end
+    return nil,count>1 and "ambiguous-coop" or "no-owner"
+end
+
+local function creditReward(pawn,currency,amount)
+    if not valid(pawn) or amount<=0 then return false end
+    local money=get(pawn,"Money")
+    local old=number(get(money,currency),0,100000000)
+    if old==nil or old+amount>100000000 then return false end
+    local goal=old+amount
+    -- UE4SS can return an attached proxy or a copied UScriptStruct.
+    put(money,currency,goal)
+    local after=number(get(get(pawn,"Money"),currency),0,100000000)
+    if after~=goal and after==old then
+        local fresh=get(pawn,"Money")
+        local newMoney={}
+        for _,key in ipairs({"Gold","Artifacts","Scraps"}) do
+            newMoney[key]=number(get(fresh,key),0,100000000)
+            if newMoney[key]==nil then return false end
+        end
+        newMoney[currency]=goal
+        put(pawn,"Money",newMoney)
+        after=number(get(get(pawn,"Money"),currency),0,100000000)
+    end
+    if after==goal then
+        pcall(function() pawn:ForceNetUpdate() end)
+        return true
+    end
+    log("DIRECT REWARD not verified "..currency..
+        " expected="..goal.." actual="..tostring(after))
+    return false
+end
+
 local function destructionEvent(ctx,origin)
     S.rawDestroyEvents=S.rawDestroyEvents+1
     local a=unwrap(ctx)
@@ -1132,13 +1188,17 @@ local function destructionEvent(ctx,origin)
         log("RAW DESTRUCTION "..origin.." actor="..tostring(path(a))..
             " host="..tostring(onHost()))
     end
+    -- Reject the common nonlethal hits before expensive reflected context.
+    if S.phase~=2 or not valid(a) then return end
+    local stats=get(a,"StatsComponent")
+    if not valid(stats) then return end
+    if origin=="health" then
+        local hp=tonumber(get(stats,"CurrentHealth"))
+        if not hp or hp>0 then return end
+    end
     if not onHost() then return end
     local gameCtx=game()
-    if not gameCtx or gameCtx.phase~=2 then
-        if S.rawDestroyEvents<=10 then log("DROP SKIP: Expedition not recognized") end
-        return
-    end
-    if not valid(a) or not valid(get(a,"StatsComponent")) then return end
+    if not gameCtx or gameCtx.phase~=2 then return end
     if get(a,"bIsQuestObjective")==true or
        get(a,"bRequireQuestObjectiveToKill")==true then return end
     -- Require an actual in-dungeon loot actor; never pay for built furniture.
@@ -1151,10 +1211,6 @@ local function destructionEvent(ctx,origin)
             log("DROP SKIP: no valid dungeon origin for "..tostring(path(a)))
         end
         return
-    end
-    if origin=="health" then
-        local hp=tonumber(get(get(a,"StatsComponent"),"CurrentHealth"))
-        if not hp or hp>0 then return end
     end
     local key=path(a)
     if not key or S.destructionSeen[key] then return end
@@ -1176,8 +1232,10 @@ local function destructionEvent(ctx,origin)
         return
     end
     S.destructionSeen[key]=true
+    local recipient,ownership=selectDestroyer(a)
     S.dropQueue[#S.dropQueue+1]={world=world,at=at,key=key,
         gold=value.gold,artifacts=value.artifacts,source=value.source,
+        recipient=recipient,recipientSource=ownership,
         queued=os.clock(),goldDone=false,artifactDone=false}
     log("DESTRUCTION queued "..key.." gold="..value.gold.." artifacts="..
         value.artifacts.." source="..value.source.." from="..origin)
