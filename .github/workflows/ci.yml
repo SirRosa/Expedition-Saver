@@ -2,7 +2,7 @@ name: Expedition Saver — validate, test and package
 
 on:
   push:
-    branches: [main, fix/death-currency-duplication, feature/direct-rewards-performance]
+    branches: [main, fix/death-currency-duplication, feature/direct-rewards-performance, fix/story-respawn-rewards-and-death-dup-v07]
   pull_request:
   workflow_dispatch:
 
@@ -33,11 +33,11 @@ jobs:
           mkdir -p out
           zip -r out/ExpeditionMapper-v0.1.0.zip ue4ss/Mods/ExpeditionMapper/
           unzip -t out/ExpeditionMapper-v0.1.0.zip
-          zip -r out/ExpeditionSaver-v0.6.0-direct-rewards-perf-test.zip ue4ss/Mods/ExpeditionSaver/
-          unzip -t out/ExpeditionSaver-v0.6.0-direct-rewards-perf-test.zip
+          zip -r out/ExpeditionSaver-v0.7.0-story-rewards-respawn-test.zip ue4ss/Mods/ExpeditionSaver/
+          unzip -t out/ExpeditionSaver-v0.7.0-story-rewards-respawn-test.zip
       - name: Publish install ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: ExpeditionSaver-v0.6.0-direct-rewards-perf-test
-          path: out/ExpeditionSaver-v0.6.0-direct-rewards-perf-test.zip
+          name: ExpeditionSaver-v0.7.0-story-rewards-respawn-test
+          path: out/ExpeditionSaver-v0.7.0-story-rewards-respawn-test.zip
           if-no-files-found: error
