@@ -23,5 +23,21 @@ jobs:
           grep -iE 'Function .*Helden.*(Money|Coin|Currency|Drop|OnDie|Die_|Death|Inventory|Loot)' /tmp/objects.txt | head -250 || true
           echo '=== SPECIFIC: character / controller / death / coin methods ==='
           grep -iE 'Function .*(HeldenCharacter|HeldenPlayerController|HeldenPhysicsCoin|HeldenCoinDispenser)' /tmp/objects.txt | grep -iE '(drop|death|money|coin|loot|inventory|pick|remove|die)' | head -250 || true
+          echo '=== RELATED CLASSES AND PROPERTIES ==='
+          grep -iE '(Class |Property ).*(Money|Coin|Drop|Death|Loot|Character)' /tmp/objects.txt | grep -iE '((HeldenCharacter|HeldenPhysicsCoin|Drop|Death|LostMoney|HeldenMoney):|Class .*Coin|Class .*Death|Class .*Loot)' | head -180 || true
+          echo '=== SCHEMA MONEY / DEATH FIELDS ==='
+          curl -fsSL --retry 2 "$base/current-schema.json.gz" -o /tmp/current-schema.json.gz
+          gzip -dc /tmp/current-schema.json.gz > /tmp/schema.json
+          python3 - <<'PY'
+import json
+j=json.load(open('/tmp/schema.json'))
+print('ROOT KEYS',str(list(j)[:12]))
+if isinstance(j,dict):
+  for k,v in j.items():
+    if 'struct' in k.lower():
+      print('STRUCT ROOT',k, 'TYPE',type(v).__name__)
+      print('HEAD',str(v)[:1200])
+      break
+PY
           echo '=== DUMP samples ==='
           head -n 12 /tmp/objects.txt
