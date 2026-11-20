@@ -1,4 +1,4 @@
--- Expedition Saver v0.5.0-alpha | Grain Rot (Helden / UE4SS 3.x)
+-- Expedition Saver v0.5.1-alpha anti-duplication | Grain Rot (Helden / UE4SS 3.x)
 -- Host-authoritative only. This mod is EXPERIMENTAL; back up the save.
 -- The latest 2026-11-20 USMAP confirms fields and reflected signatures,
 -- not the exact native save/death sequence. Every mutation is checked.
@@ -436,8 +436,8 @@ local function processCurrencyCleanup()
                                 if good and positive then
                                     local world
                                     pcall(function() world=coin:GetWorld() end)
-                                    if not job.world or not valid(world) or
-                                       path(world)==job.world then
+                                    if not job.world or
+                                       (valid(world) and path(world)==job.world) then
                                         local fits=true
                                         for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
                                             if totals[currency]+values[currency]>
@@ -729,11 +729,18 @@ local function collectAtElevator(entry,dest,pawn)
         done={},attempts={},recreated={},warnings={}}
     recoverMoney(pawn,entry)
     if CFG.CleanupNativeDeathCoins and CFG.EnableMoneyRecovery and
-       entry.money and entry.deathPos then
+       entry.money and entry.deathPos and
+       ((entry.money.Gold or 0)>0 or (entry.money.Artifacts or 0)>0 or
+        (entry.money.Scraps or 0)>0) then
         S.currencyCleanup[key]={
             pawn=pawn,money=entry.money,at=entry.deathPos,
             oldCoins=entry.oldCoins or {},world=entry.deathWorld,ticks=0
         }
+        log("DEATH COINS tracking death location "..
+            string.format("%.0f/%.0f/%.0f",entry.deathPos.X,
+                entry.deathPos.Y,entry.deathPos.Z)..
+            " Gold="..entry.money.Gold.." Artifacts="..entry.money.Artifacts..
+            " Scraps="..entry.money.Scraps)
     end
     log("INVENTORY RECOVERY queued items="..#entry.gear..
         " cash="..(entry.money and
@@ -1708,4 +1715,4 @@ hook("/Script/Engine.PlayerController:ClientRestart",
          S.coinLedger={}
          S.dropQueue={};S.destructionSeen={}
      end)
-log("v0.3.0-alpha loaded: live hook diagnostics and verified-reflection fixes")
+log("v0.5.1-alpha loaded: strict native death currency matching enabled")
