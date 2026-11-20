@@ -364,7 +364,9 @@ test("hammer destruction below health zero is required for health trigger",funct
     assert(#t.spawned==0)
     t.loot.StatsComponent.CurrentHealth=0
     h.pre(t.loot);t.tick(1)
-    assert(#t.spawned==2)
+    assert(#t.spawned==0)
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
+        "lethal callback must pay the solo player directly")
 end)
 test("elevator machine is unlocked after expedition wipe at home station",function()
     local t=fixture();t.tick()
