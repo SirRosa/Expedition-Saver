@@ -709,6 +709,43 @@ local function playerControllers(force)
     end
     return S.cachedControllers
 end
+-- Live UE4SS(7).log: GrainRotQuickJunk reports GetPawn()=nil (raw=none)
+-- while BP_HeldenPlayerController.LastPlayerChar is the valid Story player.
+-- currentPawn() intentionally remains unchanged for native respawn logic.
+-- Reward owner resolution MUST use LastPlayerChar when GetPawn is nil.
+local function rewardCharacter(pc)
+    if not valid(pc) then return nil,nil end
+    local candidates={
+        {pawn=currentPawn(pc),source="GetPawn"},
+        {pawn=resolveWeak(unwrap(get(pc,"LastPlayerChar"))),source="LastPlayerChar"},
+    }
+    local tracked=S.players[path(pc)]
+    if tracked and valid(tracked.lastPawn) then
+        candidates[#candidates+1]={pawn=tracked.lastPawn,source="tracked-live-character"}
+    end
+    local seen={}
+    for _,candidate in ipairs(candidates) do
+        local char=unwrap(candidate.pawn)
+        local id=valid(char) and path(char)
+        if id and not seen[id] then
+            seen[id]=true
+            local money=get(char,"Money")
+            -- Check actual currency fields, not merely presence of a
+            -- detached UScriptStruct proxy.
+            local gold=number(get(money,"Gold"),0,100000000)
+            local artifacts=number(get(money,"Artifacts"),0,100000000)
+            local stats=get(char,"CharacterStats")
+            local health=tonumber(get(stats,"CurrentHealth"))
+            local state=enum(get(char,"CharacterState"))
+            if gold~=nil and artifacts~=nil and state~=1 and
+               (health==nil or health>0) then
+                return char,candidate.source
+            end
+        end
+    end
+    return nil,nil
+end
+
 -- In real Expedition runs the native Die_Auth and Blueprint
 -- OnPlayerKilled hook were NEVER called (observed v0.3 log).
 -- Monitor actual controller/pawn state and preserve inventory BEFORE death.
@@ -1427,7 +1464,7 @@ local function ownerController(source)
     local pcList=playerControllers()
     for _,pc in ipairs(pcList) do
         if valid(pc) then
-            local pawn=currentPawn(pc)
+            local pawn=rewardCharacter(pc)
             if valid(pawn) and ids[path(pawn)] then return pc end
         end
     end
@@ -1469,8 +1506,8 @@ local function nearestPlayerAt(at)
     local sole,eligible,unknownPositions=nil,0,0
     for _,pc in ipairs(playerControllers()) do
         if valid(pc) then
-            local pawn=currentPawn(pc)
-            if valid(pawn) and get(pawn,"Money")~=nil then
+            local pawn=rewardCharacter(pc)
+            if valid(pawn) then
                 eligible=eligible+1
                 if eligible==1 then sole=pawn end
                 local pos=location(pawn)
@@ -1489,10 +1526,11 @@ local function nearestPlayerAt(at)
     end
     if eligible==1 and valid(sole) then return sole,"sole-player" end
     if eligible==0 then return nil,"no-eligible-player" end
-    if not at or unknownPositions>0 then
-        return nil,"player-position-unavailable"
-    end
     if valid(best) then return best,"nearest-player" end
+    if not at then return sole,"no-destroy-position-first-live-player" end
+    if unknownPositions>0 then
+        return sole,"player-position-unavailable-first-live-player"
+    end
     return nil,"no-valid-position"
 end
 
@@ -1504,8 +1542,8 @@ local function selectDestroyer(actor,origin)
     if recent and not hit.ambiguous then
         for _,pc in ipairs(playerControllers()) do
             if valid(pc) and path(pc)==hit.player then
-                local pawn=currentPawn(pc)
-                if valid(pawn) and get(pawn,"Money")~=nil then
+                local pawn=rewardCharacter(pc)
+                if valid(pawn) then
                     return pawn,"verified-"..hit.kind
                 end
             end
@@ -1518,10 +1556,10 @@ local function selectDestroyer(actor,origin)
     if at then
         for _,pc in ipairs(playerControllers()) do
             if valid(pc) then
-                local pawn=currentPawn(pc)
+                local pawn=rewardCharacter(pc)
                 local attack=S.attackIntents[path(pc)]
                 local pos=location(pawn)
-                if valid(pawn) and get(pawn,"Money")~=nil and pos and
+                if valid(pawn) and pos and
                    distance2(pos,at)<=CFG.RewardNearbyPlayerRadius^2 and
                    attack and S.pollCycle-attack.tick<=2 then
                     attacker,count=pawn,count+1
@@ -1576,9 +1614,10 @@ end
 local function destructionEvent(ctx,origin)
     S.rawDestroyEvents=S.rawDestroyEvents+1
     local a=unwrap(ctx)
-    if S.rawDestroyEvents<=10 then
-        log("RAW DESTRUCTION "..origin.." actor="..tostring(path(a))..
-            " host="..tostring(onHost()))
+    -- Do not call GetFullName()/onHost() or print from the frequently hit
+    -- health hook; the live log recorded 5,649 raw callbacks for 3 kills.
+    if CFG.Verbose and S.rawDestroyEvents<=10 then
+        log("RAW DESTRUCTION "..origin.." actor="..tostring(path(a)))
     end
     -- Reject the common nonlethal hits before expensive reflected context.
     if not (S.mode==0 or S.phase==2) or not valid(a) then return end
@@ -2103,8 +2142,19 @@ end
 -- Capture the destruction signal from the engine, not keyboard actions.
 -- Health==0 handles direct damage. Multicast catches non-health-based breakage.
 hook("/Script/Helden.HeldenPhysicsActor:OnHealthModifed",
-     safePre("health pre",function(context) destructionEvent(context,"health") end),
-     safePre("health post",function(context) destructionEvent(context,"health") end))
+     function() end, -- no expensive duplicate prehook
+     safePre("health post",function(context)
+         -- Thousands of harmless health notifications occur during level
+         -- loading and incidental damage. Only process confirmed zero HP.
+         if S.mode~=0 and S.phase~=2 then return end
+         local actor=unwrap(context)
+         if not valid(actor) then return end
+         local stats=get(actor,"StatsComponent")
+         local hp=tonumber(get(stats,"CurrentHealth"))
+         if hp and hp<=0 then
+             destructionEvent(context,"health")
+         end
+     end))
 hook("/Script/Helden.HeldenPhysicsActor:PlayDestructionEffect_Mulitcast",
      safePre("destruction",function(context) destructionEvent(context,"effect") end))
 -- Story TrashConstruct is a child of HeldenConstructActor. Native collision
@@ -2194,4 +2244,4 @@ hook("/Script/Engine.PlayerController:ClientRestart",
          S.coinLedger={}
          S.dropQueue={};S.destructionSeen={}
      end)
-log("v0.7.3 STORY+EXPEDITION: valued items, coin events, wallet backoff, XP x2 QOL")
+log("v0.7.4 LIVE-LOG FIX: LastPlayerChar reward owner + low-cost death hooks")
