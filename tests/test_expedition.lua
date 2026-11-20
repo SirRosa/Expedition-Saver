@@ -265,4 +265,22 @@ test("do not convert Epic quest artifacts",function()
     assert(#t.spawned==0 and t.loot._valid~=false)
 end)
 
+test("HasFailedExpedition overridden only on authoritative Expedition",function()
+    local t=fixture();t.tick()
+    local cb=t.hooks["/Script/Helden.HeldenGameState:HasFailedExpedition"]
+    assert(cb and type(cb.post)=="function","native post-hook missing")
+    assert(cb.post(t.gs)==false,"must suppress permadeath in Expedition")
+    t.switchMode(0)
+    assert(cb.post(t.gs)==nil,"normal mode must be unaffected")
+    t.switchMode(1)
+    t.gm._valid=false;t.registry.GameModeBase=nil
+    assert(cb.post(t.gs)==nil,"client may not override server failure")
+end)
+test("permadeath markers cleared during exploration, not only at end screen",function()
+    local t=fixture();t.tick()
+    t.md.bHasFailed=true;t.gs.bExpeditionFailed=true
+    t.tick(1)
+    assert(t.md.bHasFailed==false and t.gs.bExpeditionFailed==false)
+end)
+
 print("ALL TESTS PASSED ("..passed..")")
