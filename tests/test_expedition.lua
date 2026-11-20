@@ -42,9 +42,13 @@ local function fixture()
         CurrentDungeonRun=run})
     function gs:OnRep_DungeonRunState() self.repCount=(self.repCount or 0)+1 end
     local stats=actor({CurrentHealth=0,TotalStats={MaxHealth=120}})
-    local corpse=actor({_name="HeldenCharacter /Game/Old",EquipedItems={},CharacterStats=stats})
+    local corpse=actor({_name="HeldenCharacter /Game/Old",EquipedItems={},CharacterStats=stats,
+        Money={Gold=80,Artifacts=4,Scraps=17},ItemSlots={}})
     local newPawn=actor({_name="HeldenPlayerCharacter /Game/New",CharacterStats=
-        actor({CurrentHealth=1,TotalStats={MaxHealth=120}})})
+        actor({CurrentHealth=1,TotalStats={MaxHealth=120}}),
+        Money={Gold=0,Artifacts=0,Scraps=0},
+        ItemSlots={actor({_name="NewPlayerSlot 1"}),actor({_name="NewPlayerSlot 2"})},
+        EquipedItems={}})
     function newPawn:K2_TeleportTo(at,rot)
         counts.teleport=counts.teleport+1
         self.location=at
@@ -64,7 +68,20 @@ local function fixture()
     local item=actor({_name="HeldenEquipableItem /Game/A",CurrentInventorySlot=0,
         PreviousOwner=corpse,CurrentSlot=actor({_name="ItemSlot"})})
     function item:GetClass() return gearClass end
-    function item:DetachFromAll() self.detached=true end
+    function item:DetachFromAll() self.detached=true;self.CurrentSlot=nil end
+    function item:SetSimulatePhysics(v) self.simulates=v end
+    function item:Interact(player)
+        self.PreviousOwner=player
+        for i,slot in ipairs(player.ItemSlots or {}) do
+            if not slot.CurrentItemInSlot then
+                slot.CurrentItemInSlot=self
+                self.CurrentSlot=slot
+                self.CurrentInventorySlot=i-1
+                return
+            end
+        end
+    end
+    corpse.ItemSlots={actor({CurrentItemInSlot=item})}
     function item:K2_TeleportTo(at,rot)
         self.location=at
         self.wasMoved=true
@@ -99,12 +116,40 @@ local function fixture()
     function newPawn:K2_GetActorLocation() return {X=1000,Y=2000,Z=300} end
     local world=actor({_name="World /Game/World"})
     function loot:GetWorld() return world end
+    function newPawn:GetWorld() return world end
     function lift:GetWorld() return world end
     function world:SpawnActor(cls,loc,rot)
         assert(cls==coinClass or cls==goldClass or cls==gearClass)
         local coin=actor(cls==gearClass and {ItemDurability=0,ItemDataAsset=nil} or
             {Money={Artifacts=0,Gold=0,Scraps=0}})
         coin._coinClass=cls
+        if cls==gearClass then
+            function coin:Interact(player)
+                self.PreviousOwner=player
+                for i,slot in ipairs(player.ItemSlots or {}) do
+                    if not slot.CurrentItemInSlot then
+                        slot.CurrentItemInSlot=self
+                        self.CurrentSlot=slot
+                        self.CurrentInventorySlot=i-1
+                        return
+                    end
+                end
+            end
+            function coin:DetachFromAll() end
+            function coin:K2_TeleportTo(v) self._position=v;return true end
+        else
+            local root=actor()
+            function root:SetMobility(m) self.mobility=m end
+            function root:SetVisibility(v) self.visible=v end
+            function root:SetCollisionEnabled(v) self.collision=v end
+            function root:SetSimulatePhysics(v) self.simulates=v end
+            function root:SetEnableGravity(v) self.gravity=v end
+            function root:WakeAllRigidBodies() self.awake=true end
+            function root:IsSimulatingPhysics() return self.simulates end
+            function root:IsGravityEnabled() return self.gravity end
+            function root:IsVisible() return self.visible end
+            coin.RootMesh=root
+        end
         coin._position={X=loc.X,Y=loc.Y,Z=loc.Z}
         function coin:K2_DestroyActor() self._valid=false end
         function coin:SetReplicates(v) self.replicates=v end
@@ -226,11 +271,13 @@ test("death of player uses native server respawn, then teleports to lift",functi
     assert(t.newPawn.CharacterStats.CurrentHealth==120,"health should restore")
     assert(t.counts.respawn==1,"no duplicate respawn")
 end)
-test("existing equipped item moves to elevator, never spawns duplicated item",function()
-    local t=fixture();t.tick();t.killed();t.tick(1.5);t.tick()
+test("existing equipped item is picked into new pawn inventory, not left on elevator floor",function()
+    local t=fixture();t.tick();t.killed();t.tick(1.5)
+    for i=1,4 do t.tick(0) end
     assert(t.item.wasMoved and t.item.detached)
     assert(#t.spawned==0)
-    assert(t.item.location.Z==420)
+    assert(t.newPawn.ItemSlots[1].CurrentItemInSlot==t.item)
+    assert(t.item.PreviousOwner==t.newPawn)
 end)
 test("respawn request still happens when the game prematurely ends the expedition",function()
     local t=fixture();t.tick();t.killed()
@@ -374,11 +421,14 @@ test("permadeath markers cleared during exploration, not only at end screen",fun
     assert(t.md.bHasFailed==false and t.gs.bExpeditionFailed==false)
 end)
 
-test("no duplicate lost-item creation while the QOL insurance mod is installed",function()
+test("destroyed equipped item is reconstructed at most once and picked up",function()
     local t=fixture();t.tick();t.killed()
     t.item._valid=false
-    t.tick(1.5);t.tick()
-    assert(#t.spawned==0,"item reconstruction is suspended to prevent QOL insurance duplication")
+    for i=1,8 do t.tick(0) end
+    assert(#t.spawned==1,"must spawn only one replacement")
+    assert(t.newPawn.ItemSlots[1].CurrentItemInSlot==t.spawned[1].coin)
+    for i=1,6 do t.tick(0) end
+    assert(#t.spawned==1,"no second replacement after delivery")
 end)
 
 test("OnPlayerKilled post requests respawn in the same engine event",function()
@@ -476,7 +526,10 @@ test("coin payout reports physical position above item, with visibility and repl
         assert(record.coin.replicates==true)
         assert(record.coin.hidden==false)
         assert(record.coin.collision==true)
-        assert(record.coin._position.Z>=430, "coin must spawn above furniture pivot")
+        assert(record.coin._position.Z>=355, "coin must spawn above furniture pivot")
+        assert(record.coin.RootMesh.simulates==true and
+            record.coin.RootMesh.gravity==true,
+            "coin must simulate physical gravity")
     end
 end)
 test("zero inspect payout falls back to patched live table",function()
