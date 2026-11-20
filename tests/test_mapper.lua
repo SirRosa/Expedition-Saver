@@ -40,5 +40,5 @@ env2.RegisterKeyBind=function(key,fn) binds[key]=fn end
 assert(loadfile(code,"t",env2))()
 binds[119]()
 assert(failed, "dumper should attempt selected key")
-assert(table.concat(errors):find("ERROR in Mappings.usmap",1,true),"must log dumper failures")
+assert(table.concat(errors):find("ERROR in USMAP (automatically named Helden-*.usmap)",1,true),"must log dumper failures")
 print("PASS: dumper failure is contained and reported")
