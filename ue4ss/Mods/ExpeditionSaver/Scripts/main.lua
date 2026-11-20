@@ -199,7 +199,7 @@ local S={
     nextMachineRepair=0,machineRepairAttempts=0,
     dropQueue={},destructionSeen={},dropAttempt=0,
     deathEvents=0,newPawnEvents=0,rewardEvents=0,rawDeathEvents=0,rawDestroyEvents=0,heartbeatTicks=1000,machineRepairCycle=1000,
-    players={},observedDeaths=0,failedBarriers=0,coinsLocated=0,
+    players={},recoveries={},observedDeaths=0,failedBarriers=0,coinsLocated=0,
     failureChecks=0
 }
 local function backupFile(slot)
@@ -244,6 +244,7 @@ local function resetForSave(ctx,key,slot)
     local oldSlot=S.slot
     local oldPending=S.pending
     local oldPlayers=S.players
+    local oldRecoveries=S.recoveries
     local preserve=oldSlot==slot and (S.recoveryRequired or S.active or next(oldPending)~=nil)
     local oldDepth,oldSeed,oldOffset,oldActive,oldFailed=
         S.depth,S.highestSeed,S.offset,S.active,S.failed
@@ -256,6 +257,7 @@ local function resetForSave(ctx,key,slot)
     S.failed=preserve and oldFailed or false
     S.phase=nil;S.pending=preserve and oldPending or {};S.coinLedger={}
     S.players=preserve and oldPlayers or {}
+    S.recoveries=preserve and oldRecoveries or {}
     S.nextBackupDepth=-1
     S.dropQueue={};S.destructionSeen={}
     S.nextMachineRepair=0;S.machineRepairAttempts=0
@@ -519,76 +521,185 @@ local function heal(pawn)
     if not max or max<=0 or max>1000000 then return false end
     return put(stats,"CurrentHealth",max)
 end
-local function collectAtElevator(entry,dest,pawn)
-    if not CFG.EnableItemRecovery then return end
-    local moved,alreadyOwned,created,lost=0,0,0,0
-    local counts={}
-    local nativeRefs={}
-    local function countNative(item)
+-- Item ownership must be transferred by the native Interact path. Moving
+-- items to the lift ground (v0.4) only kept them in the world, not inventory.
+-- Recover over multiple game-thread ticks to allow native equip replication.
+local function snapshotNativeGear(pawn)
+    local refs,byClass={},{ }
+    local function track(item)
+        item=unwrap(item)
         if not valid(item) then return end
-        nativeRefs[path(item)]=true
+        refs[path(item)]=true
         local klass
         pcall(function() klass=item:GetClass() end)
-        local key=valid(klass) and path(klass)
-        if key then counts[key]=(counts[key] or 0)+1 end
+        local key=path(klass)
+        if key then byClass[key]=(byClass[key] or 0)+1 end
     end
-    each(get(pawn,"EquipedItems"),countNative)
+    each(get(pawn,"EquipedItems"),track)
     each(get(pawn,"ItemSlots"),function(slot)
-        local item=get(slot,"CurrentItemInSlot")
-        if valid(item) then countNative(item) end
+        track(get(slot,"CurrentItemInSlot"))
     end)
-    local world
-    pcall(function() world=pawn:GetWorld() end)
-    if not valid(world) then
-        local lift=first("HeldenDungeonElevator")
-        pcall(function() world=lift:GetWorld() end)
-    end
-    for i,r in ipairs(entry.gear) do
-        local item=r.ref
-        local key=r.classPath
-        local count=key and (counts[key] or 0) or 0
-        if (valid(item) and nativeRefs[path(item)]) or count>0 or
-            (valid(item) and get(item,"PreviousOwner")==pawn) then
-            if count>0 then counts[key]=count-1 end
-            -- Native game already restored an item of this class.
-            alreadyOwned=alreadyOwned+1
-        else
-            local at={X=dest.X+((i-1)%4)*55-75,
-                Y=dest.Y+math.floor((i-1)/4)*55,Z=dest.Z+40}
-            if valid(item) then
-                pcall(function() item:DetachFromAll() end)
-                if teleport(item,at) then moved=moved+1 else lost=lost+1 end
-            elseif CFG.RestoreDestroyedItems and valid(world) then
-                local klass=r.klass
-                if not valid(klass) and r.classPath and
-                    type(StaticFindObject)=="function" then
-                    pcall(function() klass=StaticFindObject(r.classPath) end)
-                end
-                if valid(klass) then
-                    local ok,newItem=pcall(function()
-                        return world:SpawnActor(klass,at,{Pitch=0,Yaw=0,Roll=0})
-                    end)
-                    if ok and valid(newItem) then
-                        if r.asset and valid(r.asset) then
-                            put(newItem,"ItemDataAsset",r.asset)
-                        end
-                        if r.durability then
-                            put(newItem,"ItemDurability",r.durability)
-                        end
-                        if r.enchant~=nil then
-                            pcall(function() newItem.ItemEnchantment=r.enchant end)
-                        end
-                        created=created+1
-                        diag("recreated destroyed gear "..r.key)
-                    else lost=lost+1 end
-                else lost=lost+1 end
-            else lost=lost+1 end
+    return refs,byClass
+end
+local function ownsItem(pawn,item)
+    if not valid(pawn) or not valid(item) then return false end
+    local refs=snapshotNativeGear(pawn)
+    if refs[path(item)] then return true end
+    local owner=get(item,"PreviousOwner")
+    return valid(owner) and path(owner)==path(pawn) and
+        valid(get(item,"CurrentSlot"))
+end
+local function collectAtElevator(entry,dest,pawn)
+    if not CFG.EnableItemRecovery then return end
+    local key=path(entry.controller)
+    if not key then return end
+    S.recoveries[key]={entry=entry,dest=dest,pawn=pawn,tick=0,
+        done={},attempts={},recreated={},warnings={}}
+    recoverMoney(pawn,entry)
+    log("INVENTORY RECOVERY queued items="..#entry.gear..
+        " cash="..(entry.money and
+            entry.money.Gold.."/"..entry.money.Artifacts.."/"..entry.money.Scraps or "unknown"))
+end
+local function isOriginalItemAlreadyPresent(pawn,rec)
+    if not valid(pawn) then return false end
+    local refs,byClass=snapshotNativeGear(pawn)
+    if refs[rec.key] then return true end
+    -- The game sometimes rebuilds objects with a different UObject path.
+    -- For this case, use strict dynamic save name when available; never
+    -- assume that one sword substitutes two distinct swords.
+    local dynamic=rec.dynamicSaveName
+    if dynamic and dynamic~="None" and dynamic~="" then
+        for _,item in ipairs(all("HeldenEquipableItem")) do
+            if valid(item) and ownsItem(pawn,item) and
+                asName(get(item,"DynamicSaveName"))==dynamic then return true end
         end
     end
-    log("EQUIPMENT native="..alreadyOwned.." moved="..moved..
-        " recreated="..created.." unavailable="..lost)
-    if lost>0 then
-        log("WARNING: "..lost.." items could not be recovered; see complete UE4SS.log")
+    return false
+end
+local function processInventoryRecoveries()
+    if not CFG.EnableItemRecovery or not onHost() then return end
+    for key,job in pairs(S.recoveries) do
+        job.tick=job.tick+1
+        local pawn=job.pawn
+        if not valid(pawn) then
+            log("INVENTORY RECOVERY aborted: pawn invalid")
+            S.recoveries[key]=nil
+        else
+            local total=#job.entry.gear
+            local retained=0
+            -- First consume native equivalents per class, counting each at
+            -- most once; never deduplicate two different instances blindly.
+            local _,remainingClass=snapshotNativeGear(pawn)
+            for _,rec in ipairs(job.entry.gear) do
+                if ownsItem(pawn,rec.ref) then
+                    local cls=rec.classPath
+                    if cls and remainingClass[cls] and remainingClass[cls]>0 then
+                        remainingClass[cls]=remainingClass[cls]-1
+                    end
+                    job.done[rec.key]=true
+                end
+            end
+            for _,rec in ipairs(job.entry.gear) do
+                if not job.done[rec.key] then
+                    if isOriginalItemAlreadyPresent(pawn,rec) then
+                        job.done[rec.key]=true
+                        local cls=rec.classPath
+                        if cls and remainingClass[cls] and remainingClass[cls]>0 then
+                            remainingClass[cls]=remainingClass[cls]-1
+                        end
+                    elseif rec.classPath and (remainingClass[rec.classPath] or 0)>0 then
+                        remainingClass[rec.classPath]=remainingClass[rec.classPath]-1
+                        job.done[rec.key]=true
+                    end
+                end
+            end
+            local unowned=0
+            for i,rec in ipairs(job.entry.gear) do
+                if job.done[rec.key] then
+                    retained=retained+1
+                else
+                    unowned=unowned+1
+                    local item=rec.ref
+                    local tries=job.attempts[rec.key] or 0
+                    local dest={X=job.dest.X+(i%5)*48-96,
+                        Y=job.dest.Y+math.floor((i-1)/5)*48,
+                        Z=job.dest.Z+25}
+                    if not valid(item) and CFG.RestoreDestroyedItems and
+                        not job.recreated[rec.key] and job.tick>=3 then
+                        local klass=rec.klass
+                        local world
+                        pcall(function() world=pawn:GetWorld() end)
+                        if not valid(world) then
+                            local lift=first("HeldenDungeonElevator")
+                            pcall(function() world=lift:GetWorld() end)
+                        end
+                        if valid(klass) and valid(world) then
+                            local ok,new=pcall(function()
+                                return world:SpawnActor(klass,dest,{Pitch=0,Yaw=0,Roll=0})
+                            end)
+                            job.recreated[rec.key]=true -- no repeat spawns
+                            if ok and valid(new) then
+                                rec.ref=new;item=new
+                                if valid(rec.asset) then put(new,"ItemDataAsset",rec.asset) end
+                                if rec.durability~=nil then
+                                    put(new,"ItemDurability",rec.durability)
+                                end
+                                -- Keep native unique ID generated by the engine.
+                                log("INVENTORY recreated missing "..rec.key..
+                                    " class="..tostring(rec.classPath))
+                            else
+                                log("INVENTORY cannot recreate "..rec.key)
+                            end
+                        end
+                    end
+                    if valid(item) and tries<CFG.InventoryRecoveryRetryTicks and
+                        job.tick%2==1 then
+                        job.attempts[rec.key]=tries+1
+                        -- Don't destroy this actor: if native pickup rejects,
+                        -- leaving it at the lift is better than losing it.
+                        pcall(function() item:DetachFromAll() end)
+                        pcall(function() item:SetSimulatePhysics(true) end)
+                        local move=teleport(item,dest)
+                        local pick,err=pcall(function() item:Interact(pawn) end)
+                        if not ownsItem(pawn,item) then
+                            local interact=get(item,"InteractComponent")
+                            if valid(interact) then
+                                local ok=pcall(function()
+                                    job.entry.controller:Interact_Server(pawn,interact)
+                                end)
+                                pick=pick or ok
+                            end
+                        end
+                        log("INVENTORY pickup "..rec.source..
+                            " key="..rec.key.." move="..tostring(move)..
+                            " nativeCall="..tostring(pick)..
+                            " owned="..tostring(ownsItem(pawn,item))..
+                            (pick and "" or " err="..tostring(err)))
+                    end
+                    if valid(item) and ownsItem(pawn,item) then
+                        job.done[rec.key]=true
+                    end
+                end
+            end
+            -- Native pickup can be asynchronous; allow rep updates. After a
+            -- bounded number of attempts, keep remaining actors on elevator
+            -- floor, never claim full success.
+            local allDone=true
+            for _,rec in ipairs(job.entry.gear) do
+                if not job.done[rec.key] then allDone=false;break end
+            end
+            if allDone or job.tick>=CFG.MaxInventoryRecoveryTicks then
+                local recovered,failed=0,0
+                for _,rec in ipairs(job.entry.gear) do
+                    if job.done[rec.key] then recovered=recovered+1
+                    else failed=failed+1 end
+                end
+                log("INVENTORY RESULT inventory="..recovered..
+                    " floor_or_missing="..failed.." total="..total..
+                    " fullyRestored="..tostring(failed==0))
+                S.recoveries[key]=nil
+            end
+        end
     end
 end
 
@@ -1107,6 +1218,7 @@ local function poll()
     keepExpedition(ctx)
     monitorPlayers(ctx)
     processDeaths(ctx)
+    processInventoryRecoveries()
     repairElevator(ctx)
     repairFailedDoor(ctx)
     processDropQueue()
