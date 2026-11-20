@@ -166,6 +166,15 @@ local function game()
     -- Some transitions leave GameState.GameModeType unset while the
     -- underlying SaveGame still identifies a valid Expedition. Require two
     -- independent saved indicators if the live GameState disagrees.
+    if gm~=1 and (sg==1 or metadataMode==1) then
+        -- FindFirstOf may point to a stale GameState from the menu or prior
+        -- level. Prefer an actually live Expedition state when one exists.
+        for _,candidate in ipairs(all("HeldenGameState")) do
+            if valid(candidate) and enum(get(candidate,"GameModeType"))==1 then
+                gs=candidate;cache.HeldenGameState=candidate;gm=1;break
+            end
+        end
+    end
     if gm~=1 and not (sg==1 and metadataMode==1) then return nil end
     local run=get(gs,"CurrentDungeonRun")
     if not run then return nil end
@@ -781,7 +790,8 @@ local function poll()
         local gs=first("HeldenGameState")
         local gi=first("HeldenGameInstance")
         local save=gi and get(gi,"CurrentSaveGame")
-        log("HEARTBEAT host="..tostring(host).." GS="..tostring(valid(gs))..
+        log("HEARTBEAT host="..tostring(host)..
+            " GS="..tostring(path(gs))..
             " mode="..tostring(enum(get(gs,"GameModeType")))..
             " save="..tostring(valid(save))..
             " saveMode="..tostring(enum(get(save,"GameMode")))..
