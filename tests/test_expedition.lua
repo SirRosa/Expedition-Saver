@@ -123,7 +123,7 @@ local function fixture()
         RegisterKeyBind=function(key,callback) keys[key]=callback end,
         Key={F7=118},
         LoopInGameThreadWithDelay=function(ms,callback)
-            assert(ms==450);clockcb=callback;return 1
+            assert(ms==300);clockcb=callback;return 1
         end,
         ExecuteInGameThread=function(callback) callback() end,
     },{__index=_G})
@@ -359,6 +359,25 @@ test("destroyed player gear is recreated once at lift after native respawn",func
     assert(#t.spawned==1,"must recreate lost item, not only move surviving actors")
     assert(t.spawned[1].coin.ItemDurability==0)
     t.tick(2);assert(#t.spawned==1,"must not duplicate lost inventory on next poll")
+end)
+
+test("OnPlayerKilled post requests respawn in the same engine event",function()
+    local t=fixture();t.tick();t.killed()
+    local event=t.hooks["/Script/Helden.HeldenPlayerController:OnPlayerKilled"]
+    assert(event and event.post)
+    event.post(t.pc)
+    assert(t.counts.respawn==1,"must not wait for wipe/end screen")
+    t.tick(1)
+    assert(t.newPawn.location and t.newPawn.location.Z==380)
+    assert(t.counts.respawn==1,"no double native respawn")
+end)
+test("Expedition mode recovery accepts metadata after runtime mode resets",function()
+    local t=fixture();t.tick()
+    t.gs.GameModeType=0
+    t.save.GameMode=1;t.md.GameMode=1
+    t.md.bHasFailed=true
+    t.tick(1)
+    assert(t.md.bHasFailed==false)
 end)
 
 print("ALL TESTS PASSED ("..passed..")")
