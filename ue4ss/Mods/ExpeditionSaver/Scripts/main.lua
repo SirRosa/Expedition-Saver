@@ -1268,8 +1268,16 @@ local function observeClientRespawnAudio()
         return valid(o) and valid(get(o,"CharacterStats"))
     end
 
+    -- A dying old pawn may remain the controller's GetPawn while OnNewPawn
+    -- already reports a fully alive replacement. Prefer the actually alive
+    -- pawn, then the newer confirmed OnNewPawn target, then LastPlayerChar.
+    local pawnStats=character(pawn) and get(pawn,"CharacterStats")
+    local pawnHp=tonumber(get(pawnStats,"CurrentHealth"))
+    local pawnState=enum(get(pawn,"CharacterState"))
+    local pawnAlive=character(pawn) and not isSoul and pawnHp and
+        pawnHp>0 and pawnState~=1
     local char=nil
-    if character(pawn) and not isSoul then
+    if pawnAlive then
         char=pawn
     elseif clientAudio.armed and character(clientAudio.pendingPawn) then
         -- OnNewPawn can arrive before LastPlayerChar/GetPawn replicates.
