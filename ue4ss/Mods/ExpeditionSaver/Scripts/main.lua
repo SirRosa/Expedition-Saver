@@ -7,6 +7,7 @@ local CFG = {
     AnimationSample = 8,
     MaxDepth = 10000,
     EnableRespawn = true,
+    EnableRespawnSound = true, -- local player only, after verified successful respawn
     EnableItemRecovery = true,
     RestoreDestroyedItems = true, -- only after native inventory reconciliation, with dedup
     MaxGearPerPlayer = 64,
@@ -1130,6 +1131,76 @@ local function processInventoryRecoveries()
     end
 end
 
+-- Audio is deliberately outside Unreal's game thread and does not use
+-- UObject/USoundBase APIs: the attached MPEG has been converted to WAV.
+-- UE4SS does not natively import arbitrary audio as a cooked USoundBase.
+-- Tiny, source-auditable helper: Audio/respawn_audio.exe (WinMM PlaySoundW).
+-- Both files must be installed. Missing files fail open without affecting
+-- respawn, item recovery, currency or game performance.
+local respawnAudioRoot=nil
+local respawnAudioMissingLogged=false
+local function audioFolder()
+    if respawnAudioRoot then return respawnAudioRoot end
+    local dirs={}
+    local ok,info=pcall(function() return debug.getinfo(1,"S") end)
+    local source=ok and info and info.source
+    if type(source)=="string" and source:sub(1,1)=="@" then
+        local scriptDir=source:sub(2):match("^(.*[\\/])[^\\/]+$")
+        if scriptDir then dirs[#dirs+1]=scriptDir.."../Audio/" end
+    end
+    dirs[#dirs+1]="Mods/ExpeditionSaver/Audio/"
+    dirs[#dirs+1]="ue4ss/Mods/ExpeditionSaver/Audio/"
+    local function exists(path)
+        local ok,h=pcall(function() return io.open(path,"rb") end)
+        if ok and h then pcall(function() h:close() end);return true end
+        return false
+    end
+    for _,dir in ipairs(dirs) do
+        if exists(dir.."respawn_audio.exe") and exists(dir.."respawn.wav") then
+            respawnAudioRoot=dir
+            return dir
+        end
+    end
+    return nil
+end
+local function playRespawnSound(pc)
+    if not CFG.EnableRespawnSound then return end
+    -- Audio is local, not network-replicated. Remote players' respawn
+    -- is silent on the host; they need the same mod on their own PC.
+    if valid(pc) then
+        local ok,isLocal=pcall(function() return pc:IsLocalController() end)
+        if ok and isLocal==false then return end
+    end
+    if type(ExecuteAsync)~="function" or type(os.execute)~="function" then
+        if not respawnAudioMissingLogged then
+            respawnAudioMissingLogged=true
+            log("RESPAWN SOUND unavailable: UE4SS ExecuteAsync/os.execute missing")
+        end
+        return
+    end
+    local dir=audioFolder()
+    if not dir then
+        if not respawnAudioMissingLogged then
+            respawnAudioMissingLogged=true
+            log("RESPAWN SOUND missing Audio/respawn.wav or respawn_audio.exe")
+        end
+        return
+    end
+    local exe=dir.."respawn_audio.exe"
+    local wav=dir.."respawn.wav"
+    -- Each path is double-quoted and the whole command is protected for
+    -- cmd.exe /c (works with Steam libraries containing whitespace).
+    if exe:find('"',1,true) or wav:find('"',1,true) then return end
+    local command='""'..exe..'" "'..wav..'""'
+    local ok,err=pcall(function()
+        ExecuteAsync(function()
+            local ran,why=pcall(os.execute,command)
+            if not ran then log("RESPAWN SOUND process error: "..tostring(why)) end
+        end)
+    end)
+    if not ok then log("RESPAWN SOUND async dispatch failed: "..tostring(err)) end
+end
+
 local function reviveOldPawn(entry)
     if not CFG.EnableExistingPawnReviveFallback then return false end
     local char,pc=entry.oldChar,entry.controller
@@ -1191,6 +1262,7 @@ local function processDeaths(ctx)
                     log("respawn in elevator "..key.."; healed="..tostring(healed))
                     S.pending[key]=nil
                     S.respawned=S.respawned+1
+                    if healed then playRespawnSound(entry.controller) end
                 end
             elseif entry.attempts<CFG.MaxRespawnRequests and
                    entry.ageTicks>=(entry.nextRequestTick or 1) then
@@ -1209,6 +1281,7 @@ local function processDeaths(ctx)
                     log("REVIVE FALLBACK succeeded, recovered existing player pawn")
                     S.pending[key]=nil
                     S.respawned=S.respawned+1
+                    playRespawnSound(entry.controller)
                 end
             end
         end
@@ -2264,4 +2337,4 @@ hook("/Script/Engine.PlayerController:ClientRestart",
          S.coinLedger={}
          S.dropQueue={};S.destructionSeen={}
      end)
-log("v0.7.4 LIVE-LOG FIX: LastPlayerChar reward owner + low-cost death hooks")
+log("v0.7.5 LIVE-LOG FIX + optional local respawn WAV (async WinMM)")
