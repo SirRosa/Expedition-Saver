@@ -760,8 +760,11 @@ local function destructionEvent(ctx,origin)
 end
 local function spawnMoney(world,position,actorClass,amount,currency)
     if not valid(world) or not valid(actorClass) or amount<=0 then return false end
+    -- Spawn above destroyed furniture so collision/physics can't bury the
+    -- item inside the floor. v0.3 spawned at the old actor's pivot.
+    local coinPosition={X=position.X,Y=position.Y,Z=position.Z+130}
     local ok,coin=pcall(function()
-        return world:SpawnActor(actorClass,position,{Pitch=0,Yaw=0,Roll=0})
+        return world:SpawnActor(actorClass,coinPosition,{Pitch=0,Yaw=0,Roll=0})
     end)
     if not ok or not valid(coin) then
         log("COIN SPAWN FAILED "..currency.." x"..amount.." error="..tostring(coin))
@@ -800,6 +803,35 @@ local function spawnMoney(world,position,actorClass,amount,currency)
             log("COIN INITIALIZATION FAILED "..currency.." x"..amount)
             return false
         end
+    end
+    -- Validating a UStruct does not prove the actor is visible/pickable.
+    -- Enable standard Actor visibility, collision and replication, then
+    -- read its final position back for evidence in a real UE4SS log.
+    local replicated=pcall(function() coin:SetReplicates(true) end)
+    local visible=pcall(function() coin:SetActorHiddenInGame(false) end)
+    local collision=pcall(function() coin:SetActorEnableCollision(true) end)
+    pcall(function() coin:K2_SetActorLocation(coinPosition,false,{},true) end)
+    local actualPosition=location(coin)
+    local mesh=get(coin,"RootMesh")
+    local meshVisible
+    if valid(mesh) then
+        pcall(function() mesh:SetVisibility(true,true) end)
+        pcall(function() mesh:SetCollisionEnabled(3) end)
+        pcall(function() meshVisible=mesh:IsVisible() end)
+    end
+    S.coinsLocated=S.coinsLocated+1
+    if S.coinsLocated<=25 then
+        local klass
+        pcall(function() klass=coin:GetClass() end)
+        log("COIN PHYSICAL "..currency.." x"..amount..
+            " class="..tostring(path(klass))..
+            " pos="..(actualPosition and
+                (string.format("%.0f,%.0f,%.0f",
+                    actualPosition.X,actualPosition.Y,actualPosition.Z)) or "UNKNOWN")..
+            " replicatedCall="..tostring(replicated)..
+            " unhiddenCall="..tostring(visible)..
+            " collisionCall="..tostring(collision)..
+            " meshVisible="..tostring(meshVisible))
     end
     return true
 end
