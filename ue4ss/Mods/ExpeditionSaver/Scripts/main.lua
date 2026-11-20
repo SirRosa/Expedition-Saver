@@ -843,7 +843,7 @@ if CFG.EnableNoPermadeath then
                 log("END RUN failure event; protected depth="..S.depth)
             end
         end))
-    hook("/Script/Helden.HeldenElevatorMachine:CanBeInteracted",
+    hook("/Script/Helden.HeldenInteractableObject:CanBeInteracted",
         function() end,
         safePostBool(function(context)
             if not S.recoveryRequired or not onHost() then return end
