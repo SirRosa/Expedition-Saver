@@ -499,13 +499,28 @@ local function rowOf(tableObject,rowName)
         return unwrap(row[key])
     end
 end
+local function getDataSingleton()
+    local ds=first("HeldenDataSingleton")
+    if valid(ds) then return ds end
+    -- The game's singleton may initially exist only through a CDO. Unlike
+    -- generic actor searches, we can use its reflected static Get().
+    local ok,list=pcall(FindAllOf,"HeldenDataSingleton")
+    if ok and type(list)=="table" then
+        for _,entry in ipairs(list) do
+            if valid(entry) then
+                local good,instance=pcall(function() return entry:Get() end)
+                if good and valid(instance) then return instance end
+            end
+        end
+    end
+end
 local function lootValue(actor)
     if not valid(actor) then return nil end
     local id=path(actor) or ""
     local normalized=id:lower()
     -- Coin/pickup destruction must never recursively create currency.
     if normalized:find("coin",1,true) or normalized:find("pickup",1,true) then return nil end
-    local ds=first("HeldenDataSingleton")
+    local ds=getDataSingleton()
     local inspected
     pcall(function() inspected=actor:GetInspectData() end)
     if inspected and get(inspected,"bIsInDungeon")==true then
@@ -654,7 +669,7 @@ local function spawnMoney(world,position,actorClass,amount,currency)
 end
 local function processDropQueue()
     if #S.dropQueue==0 or not onHost() then return end
-    local ds=first("HeldenDataSingleton")
+    local ds=getDataSingleton()
     if not ds then return end
     local goldClass=get(ds,"GoldCoinActorClass")
     local artifactClass=get(ds,"ArtifactCoinActorClass")
@@ -940,7 +955,8 @@ end
 -- Capture the destruction signal from the engine, not keyboard actions.
 -- Health==0 handles direct damage. Multicast catches non-health-based breakage.
 hook("/Script/Helden.HeldenPhysicsActor:OnHealthModifed",
-     safePre("health",function(context) destructionEvent(context,"health") end))
+     safePre("health pre",function(context) destructionEvent(context,"health") end),
+     safePre("health post",function(context) destructionEvent(context,"health") end))
 hook("/Script/Helden.HeldenPhysicsActor:PlayDestructionEffect_Mulitcast",
      safePre("destruction",function(context) destructionEvent(context,"effect") end))
 local function safePoll(onTimer)
