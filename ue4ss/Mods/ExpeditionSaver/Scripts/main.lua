@@ -1,4 +1,4 @@
--- Expedition Saver v0.2.0-alpha | Grain Rot (Helden / UE4SS 3.x)
+-- Expedition Saver v0.3.0-diagnostic | Grain Rot (Helden / UE4SS 3.x)
 -- Host-authoritative only. This mod is EXPERIMENTAL; back up the save.
 -- The latest 2026-11-20 USMAP confirms fields and reflected signatures,
 -- not the exact native save/death sequence. Every mutation is checked.
@@ -47,6 +47,18 @@ local function unwrap(o)
     local ok,r=pcall(function() return o:get() end)
     if ok then return r end
     return o
+end
+local function resolveWeak(o)
+    if valid(o) then return o end
+    if o==nil then return nil end
+    local ok,r=pcall(function() return o:Get() end)
+    if ok and valid(r) then return r end
+end
+local function asName(o)
+    if o==nil then return nil end
+    local ok,r=pcall(function() return o:ToString() end)
+    if ok and r then return tostring(r) end
+    return tostring(o)
 end
 local function number(o,lo,hi)
     local n=tonumber(o)
@@ -170,7 +182,7 @@ local S={
     lastHeartbeat=-1000,lastGuard=nil,recoveryRequired=false,
     nextMachineRepair=0,machineRepairAttempts=0,
     dropQueue={},destructionSeen={},dropAttempt=0,
-    deathEvents=0,newPawnEvents=0,rewardEvents=0
+    deathEvents=0,newPawnEvents=0,rewardEvents=0,rawDeathEvents=0,rawDestroyEvents=0
 }
 local function backupFile(slot)
     if not CFG.BackupFile then return nil end
@@ -213,10 +225,16 @@ end
 local function resetForSave(ctx,key,slot)
     local oldSlot=S.slot
     local oldPending=S.pending
-    local preserve=oldSlot==slot and S.recoveryRequired
+    local preserve=oldSlot==slot and (S.recoveryRequired or S.active or next(oldPending)~=nil)
+    local oldDepth,oldSeed,oldOffset,oldActive,oldFailed=
+        S.depth,S.highestSeed,S.offset,S.active,S.failed
     S.slot=slot;S.saveKey=key
     S.depth=number(get(ctx.save,"DungeonLevel"),0,CFG.MaxDepth) or 0
-    S.highestSeed=0;S.offset=nil;S.active=false;S.failed=false
+    if preserve and oldDepth>S.depth then S.depth=oldDepth end
+    S.highestSeed=preserve and oldSeed or 0
+    S.offset=preserve and oldOffset or nil
+    S.active=preserve and oldActive or false
+    S.failed=preserve and oldFailed or false
     S.phase=nil;S.pending=preserve and oldPending or {};S.coinLedger={}
     S.nextBackupDepth=-1
     S.dropQueue={};S.destructionSeen={}
@@ -225,10 +243,16 @@ local function resetForSave(ctx,key,slot)
     local fails=number(get(ctx.save,"DungeonFails"),0,1000000000)
     local recovered=readBackup(slot,time,fails)
     if recovered and recovered>S.depth then S.depth=recovered end
-    log("Expedition slot "..slot.." loaded; protected depth "..S.depth)
+    log("Expedition slot "..slot.." loaded; protected depth "..S.depth..
+        " retainedRunState="..tostring(preserve))
 end
 local function keepExpedition(ctx)
     if not CFG.EnableNoPermadeath then return end
+    -- EndScreen+Failed is sufficient even when no previous Exploring poll ran.
+    if ctx.phase==3 and ctx.failed then
+        if not S.recoveryRequired then log("RECOVERY detected directly from EndScreen/Failed") end
+        S.active=true;S.failed=true;S.recoveryRequired=true
+    end
     local raw=number(get(ctx.save,"DungeonLevel"),0,CFG.MaxDepth)
     if not raw then return end
     if raw>S.depth then S.depth=raw;diag("reached save depth "..raw) end
@@ -466,11 +490,12 @@ end
 -- IMPORTANT: Read live structs/tables, which also sees QOL's edited values.
 local function rowOf(tableObject,rowName)
     if not valid(tableObject) or not rowName then return nil end
-    local ok,row=pcall(function() return tableObject:FindRow(rowName) end)
+    local key=asName(rowName)
+    local ok,row=pcall(function() return tableObject:FindRow(key) end)
     if ok and row then return unwrap(row) end
     ok,row=pcall(function() return tableObject:GetRowMap() end)
     if ok and type(row)=="table" then
-        return unwrap(row[tostring(rowName)])
+        return unwrap(row[key])
     end
 end
 local function lootValue(actor)
@@ -493,27 +518,29 @@ local function lootValue(actor)
     if not ds then return nil end
     -- Reflected actor DataName fields are used as keys; never infer rewards
     -- from an object's color or from an unrelated player's inventory.
-    local construct=get(actor,"ConstructAsset")
-    if valid(construct) then
-        local n=get(construct,"DataName")
-        local dt=get(ds,"ConstructAssetDataTable")
-        local row=rowOf(dt,n)
-        if row then
-            local quality=enum(get(actor,"ConstructQuality"))
-            local key=quality==2 and "Parsed_ScrapValue_Epic"
-                or quality==1 and "Parsed_ScrapValue_Rare"
-                or "Parsed_ScrapValue_Common"
-            local value=get(row,key)
-            if value then
-                return {gold=number(get(value,"Gold"),0,CFG.MaxCoinsPerDrop) or 0,
-                    artifacts=number(get(value,"Artifacts"),0,CFG.MaxCoinsPerDrop) or 0,
-                    source="construct-table"}
-            end
+    -- These are the actual reflected HeldenConstructActor methods.
+    local struct
+    pcall(function() struct=actor:GetConstructAssetData() end)
+    local construct
+    pcall(function() construct=actor:GetConstructAsset() end)
+    if not struct and valid(construct) then
+        struct=rowOf(get(ds,"ConstructAssetDataTable"),get(construct,"DataName"))
+    end
+    if struct then
+        local quality=enum(get(actor,"ConstructQuality"))
+        local key=quality==2 and "Parsed_ScrapValue_Epic"
+            or quality==1 and "Parsed_ScrapValue_Rare"
+            or "Parsed_ScrapValue_Common"
+        local value=get(struct,key)
+        if value then
+            return {gold=number(get(value,"Gold"),0,CFG.MaxCoinsPerDrop) or 0,
+                artifacts=number(get(value,"Artifacts"),0,CFG.MaxCoinsPerDrop) or 0,
+                source="construct-asset-data"}
         end
     end
     -- Non-construct physical loot uses PhysActorData, where QOL multiplies
     -- Parsed_ScrapReward.Gold. No additional multiplier is applied here.
-    local n=get(actor,"ConstructDataName") or get(actor,"StatsDataName")
+    local n=get(actor,"StatsDataName") or get(actor,"ConstructDataName")
     if not n then return nil end
     local row=rowOf(get(ds,"PhysActorDataTable"),n)
     local value=row and get(row,"Parsed_ScrapReward")
@@ -523,19 +550,32 @@ local function lootValue(actor)
         source="physical-table"}
 end
 local function destructionEvent(ctx,origin)
+    S.rawDestroyEvents=S.rawDestroyEvents+1
+    local a=unwrap(ctx)
+    if S.rawDestroyEvents<=10 then
+        log("RAW DESTRUCTION "..origin.." actor="..tostring(path(a))..
+            " host="..tostring(onHost()))
+    end
     if not onHost() then return end
     local gameCtx=game()
-    if not gameCtx or gameCtx.phase~=2 then return end
-    local a=unwrap(ctx)
+    if not gameCtx or gameCtx.phase~=2 then
+        if S.rawDestroyEvents<=10 then log("DROP SKIP: Expedition not recognized") end
+        return
+    end
     if not valid(a) or not valid(get(a,"StatsComponent")) then return end
     if get(a,"bIsQuestObjective")==true or
        get(a,"bRequireQuestObjectiveToKill")==true then return end
     -- Require an actual in-dungeon loot actor; never pay for built furniture.
-    local owning=get(a,"OwningDungeon")
+    local owning=resolveWeak(get(a,"OwningDungeon"))
     local inspecting
     pcall(function() inspecting=a:GetInspectData() end)
     local inDungeon=inspecting and get(inspecting,"bIsInDungeon")==true
-    if not inDungeon and not valid(unwrap(owning)) then return end
+    if not inDungeon and not valid(owning) then
+        if S.rawDestroyEvents<=10 then
+            log("DROP SKIP: no valid dungeon origin for "..tostring(path(a)))
+        end
+        return
+    end
     if origin=="health" then
         local hp=tonumber(get(get(a,"StatsComponent"),"CurrentHealth"))
         if not hp or hp>0 then return end
