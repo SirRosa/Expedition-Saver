@@ -465,6 +465,8 @@ local function destructionEvent(ctx,origin)
     if not gameCtx or gameCtx.phase~=2 then return end
     local a=unwrap(ctx)
     if not valid(a) or not valid(get(a,"StatsComponent")) then return end
+    if get(a,"bIsQuestObjective")==true or
+       get(a,"bRequireQuestObjectiveToKill")==true then return end
     -- Require an actual in-dungeon loot actor; never pay for built furniture.
     local owning=get(a,"OwningDungeon")
     local inspecting
