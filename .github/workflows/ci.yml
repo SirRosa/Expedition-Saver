@@ -24,14 +24,20 @@ jobs:
           luac5.4 -p tests/test_mapper.lua
       - name: Test mapping collector
         run: lua5.4 tests/test_mapper.lua
+      - name: Expedition Saver syntax check
+        run: luac5.4 -p ue4ss/Mods/ExpeditionSaver/Scripts/main.lua tests/test_expedition.lua
+      - name: Test Expedition Saver game logic
+        run: lua5.4 tests/test_expedition.lua
       - name: Package mapper (read-only diagnostic)
         run: |
           mkdir -p out
           zip -r out/ExpeditionMapper-v0.1.0.zip ue4ss/Mods/ExpeditionMapper/
           unzip -t out/ExpeditionMapper-v0.1.0.zip
+          zip -r out/ExpeditionSaver-v0.1.0-alpha.zip ue4ss/Mods/ExpeditionSaver/
+          unzip -t out/ExpeditionSaver-v0.1.0-alpha.zip
       - name: Publish install ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: ExpeditionMapper-v0.1.0
-          path: out/ExpeditionMapper-v0.1.0.zip
+          name: ExpeditionSaver-v0.1.0-alpha
+          path: out/ExpeditionSaver-v0.1.0-alpha.zip
           if-no-files-found: error
