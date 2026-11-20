@@ -631,8 +631,14 @@ local function restoreExtraSlot(pawn,rec)
         each(get(pawn,"EquipedItems"),match)
         if not item then return false,"owned_actor_not_identified" end
     end
+    local slot
+    pcall(function() slot=slots[idx+1] end)
+    local component=get(slot,"SlotComponent")
+    if not valid(component) then return false,"extra_component_missing" end
     local current=number(get(item,"CurrentInventorySlot"),0,128)
-    if current==idx then return true,"already_target_slot" end
+    if current==idx and path(get(item,"CurrentSlot"))==path(component) then
+        return true,"already_target_slot"
+    end
     local occupied=false
     each(get(pawn,"EquipedItems"),function(other)
         if valid(other) and path(other)~=path(item) and
@@ -641,10 +647,6 @@ local function restoreExtraSlot(pawn,rec)
         end
     end)
     if occupied then return false,"saved_slot_occupied" end
-    local slot
-    pcall(function() slot=slots[idx+1] end)
-    local component=get(slot,"SlotComponent")
-    if not valid(component) then return false,"extra_component_missing" end
     local wrote=put(item,"CurrentSlot",component)
     wrote=put(item,"CurrentInventorySlot",idx) and wrote
     if not wrote or number(get(item,"CurrentInventorySlot"),0,128)~=idx or
