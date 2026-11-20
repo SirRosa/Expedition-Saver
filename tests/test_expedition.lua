@@ -219,6 +219,9 @@ local function fixture()
                     CharacterStats=actor({CurrentHealth=100,
                         TotalStats={MaxHealth=100}})})
                 function second:GetPawn() return otherPawn end
+                function otherPawn:K2_GetActorLocation()
+                    return {X=1010,Y=2000,Z=300}
+                end
                 listing.HeldenPlayerController[2]=second
             end
             local h=hooks["/Script/Helden.HeldenPhysicsActor:OnHealthModifed"]
@@ -740,13 +743,25 @@ test("pre-existing money on floor remains untouched even if value matches",funct
     assert(t.newPawn.Money.Gold==80)
 end)
 
-test("partial nearby currency cannot be deleted by approximate matching",function()
+test("partial native death drop is removed without needing exact full wallet sum",function()
     local t=fixture()
     t.tick(0);t.killed()
-    local near=makeCoin(t,"unrelated_gold",
-        {Gold=40,Artifacts=4,Scraps=17})
+    local near=makeCoin(t,"partial_death_currency",
+        {Gold=40,Artifacts=4,Scraps=0})
     for _=1,9 do t.tick(0) end
-    assert(near:IsValid() and near.Money.Gold==40)
+    assert(near.destroyed and near.Money.Gold==0,
+        "native partial coin must be removed only after wallet is restored")
+    assert(t.newPawn.Money.Gold==80 and t.newPawn.Money.Artifacts==4)
+    assert(t.item:IsValid(),"death money cleanup never destroys equipment")
+end)
+
+test("new coins exceeding wallet budget are not deleted",function()
+    local t=fixture()
+    t.tick(0);t.killed()
+    local unrelated=makeCoin(t,"too_large_coin",
+        {Gold=500,Artifacts=0,Scraps=0})
+    for _=1,9 do t.tick(0) end
+    assert(unrelated:IsValid() and unrelated.Money.Gold==500)
     assert(t.newPawn.Money.Gold==80)
 end)
 
@@ -754,7 +769,7 @@ test("stale death-area coins cannot be removed",function()
     local t=fixture()
     t.tick(0);t.killed()
     local stale=makeCoin(t,"stale_gold",
-        {Gold=80,Artifacts=4,Scraps=17},1010,30)
+        {Gold=80,Artifacts=4,Scraps=17},1010,35)
     for _=1,9 do t.tick(0) end
     assert(stale:IsValid() and stale.Money.Gold==80)
 end)
@@ -882,6 +897,68 @@ test("two active damage sources make payout unassignable",function()
     t.tick(0)
     assert(#t.spawned==2)
     assert(t.corpse.Money.Gold==80 and secondPawn.Money.Gold==5)
+end)
+
+test("Story mode native death respawns and recovers wallet plus inventory",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.registry.HeldenDungeonElevator=nil
+    t.registry.HeldenElevator=nil
+    t.tick(0)
+    t.killed()
+    for _=1,8 do t.tick(0) end
+    assert(t.counts.respawn==1,
+        "native respawn must work in Story Default=0")
+    assert(t.newPawn.location and t.newPawn.location.X==1000,
+        "Story should preserve a valid native spawn location")
+    assert(t.newPawn.Money.Gold==80 and t.newPawn.Money.Artifacts==4
+        and t.newPawn.Money.Scraps==17,"wallet survives Story death")
+    assert(t.newPawn.ItemSlots[1].CurrentItemInSlot==t.item,
+        "Story must recover held items")
+    assert(t.save.DungeonLevel==2,
+        "Story respawn never mutates Expedition depth")
+end)
+
+test("Story furniture rewards are paid directly even without dungeon owner",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.loot.OwningDungeon=nil
+    t.loot.GetInspectData=function()
+        return {bIsInDungeon=false,
+            Value={Gold=20,Artifacts=6,Scraps=5}}
+    end
+    t.tick(0)
+    t.destroyLoot(true)
+    t.tick(0)
+    assert(t.corpse.Money.Gold==100 and t.corpse.Money.Artifacts==10,
+        "Story Gold and tokens go straight into wallet")
+    assert(#t.spawned==0,
+        "no physics coins when Story receiver is known")
+end)
+
+test("Story death with currency drops removes coins, not equipment",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.tick(0)
+    t.killed()
+    local dropped=makeCoin(t,"story_death_drop",
+        {Gold=80,Artifacts=4,Scraps=0})
+    for _=1,10 do t.tick(0) end
+    assert(t.newPawn.Money.Gold==80)
+    assert(dropped.destroyed,"Story duplicated money drops must be removed")
+    assert(t.item:IsValid(),"never destroy dropped gear")
+end)
+
+test("Story failure does not modify Expedition-only failure flags",function()
+    local t=fixture()
+    t.switchMode(0)
+    t.tick(0)
+    t.md.bHasFailed=true
+    t.gs.bExpeditionFailed=true
+    t.run.State=3;t.run.Flags=1
+    t.tick(0)
+    assert(t.md.bHasFailed and t.gs.bExpeditionFailed,
+        "Expedition save repairs must remain disabled in Story")
 end)
 
 print("ALL TESTS PASSED ("..passed..")")
