@@ -1111,6 +1111,9 @@ test("Story native resource configured as Scraps never fabricates Gold or tokens
     t.registry.HeldenDataSingleton=nil
     t.loot.RandomMoneySpawn={Type=0,Amount=200}
     t.loot.MoneySpawnChance=100
+    function t.loot:GetInspectData()
+        return {bIsInDungeon=false,Value={Gold=0,Artifacts=0,Scraps=0}}
+    end
     t.tick(0);t.destroyLoot(true);t.tick(0)
     assert(t.corpse.Money.Gold==80 and t.corpse.Money.Artifacts==4)
     assert(t.corpse.Money.Scraps==17 and #t.spawned==0)
