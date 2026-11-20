@@ -1494,7 +1494,8 @@ test("client with GetPawn=nil uses LastPlayerChar and hears respawn",function()
     t.newPawn.CharacterStats.CurrentHealth=120
     t.tick(0)
     assert(#t.audioCommands==1,
-        "client audio must work when GetPawn() is nil (live log scenario)")
+        "client audio must work when GetPawn() is nil (live log scenario); calls="..
+        #t.audioCommands.." logs="..table.concat(t.logs," | "))
 end)
 
 test("client old-pawn revive at same character path plays exactly once",function()
