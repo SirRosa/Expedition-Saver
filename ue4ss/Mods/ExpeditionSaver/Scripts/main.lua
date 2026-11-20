@@ -1,4 +1,4 @@
--- Expedition Saver v0.5.1-alpha anti-duplication | Grain Rot (Helden / UE4SS 3.x)
+-- Expedition Saver v0.7.0 story + expedition respawn and currency | Helden / UE4SS 3.x
 -- Host-authoritative only. This mod is EXPERIMENTAL; back up the save.
 -- The latest 2026-11-20 USMAP confirms fields and reflected signatures,
 -- not the exact native save/death sequence. Every mutation is checked.
@@ -2044,4 +2044,4 @@ hook("/Script/Engine.PlayerController:ClientRestart",
          S.coinLedger={}
          S.dropQueue={};S.destructionSeen={}
      end)
-log("v0.5.1-alpha loaded: strict native death currency matching enabled")
+log("v0.7.0 STORY+EXPEDITION active: direct reward, respawn, partial death-coin dedup")
