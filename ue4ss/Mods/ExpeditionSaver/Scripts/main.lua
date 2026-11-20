@@ -29,6 +29,11 @@ local CFG = {
     PlayerControllerScanPolls = 100, -- cache live controllers for up to 30s; invalidate on new pawn
     UseCoinObjectTracking = true, -- UE4SS NotifyOnNewObject avoids periodic coin registry scans
     RecentCoinMaxReferences = 512,
+    StoryValueGoldFromScraps = 3, -- deliberate modded reward, not a native destruction drop
+    StoryValueGoldFromXPDivisor = 6,
+    StoryValuableMinScraps = 3,
+    StoryValuableMinXP = 10,
+    StoryArtifactScrapsPerCoin = 12, -- rare, epic or treasure objects only
     DeathCoinScanEveryPolls = 8, -- 2.4s between full scans while recovering
     RespawnDelaySeconds = 0.15,
     RespawnRetrySeconds = 1.5,
@@ -1249,8 +1254,9 @@ local function storyFallbackValue(actor,inspectedZero)
                     artifacts=kind==2 and amount or 0,
                     source="story-trash-native-money-resource"}
             end
-            return {gold=0,artifacts=0,
-                source="story-trash-native-chance-not-triggered"}
+            -- Native random chance failed, but this does not imply that
+            -- a VALUABLE Story item has zero scrap/sale value. Continue
+            -- to inspect its economic value rather than suppress payout.
         end
         -- Native physical-actor resource rewards can also be specified
         -- directly as a HeldenMoney struct rather than through a row.
@@ -1260,6 +1266,44 @@ local function storyFallbackValue(actor,inspectedZero)
         if gold>0 or artifacts>0 then
             return {gold=gold,artifacts=artifacts,
                 source="story-physics-resource-drop-amount"}
+        end
+
+        -- In Story Mode smashing valuables normally grants scrap, while
+        -- their Gold value comes from the Grinder. A destruction callback
+        -- therefore often reports Gold=0,Artifacts=0 even for a valuable
+        -- item. Derive an explicit MOD reward from *this actor's* nonzero
+        -- scrap/sale value (or XP) rather than pretending native coins exist.
+        local inspected
+        pcall(function() inspected=actor:GetInspectData() end)
+        local v=get(inspected,"Value")
+        local scrap=number(get(v,"Scraps"),0,CFG.MaxCoinsPerDrop) or 0
+        scrap=math.max(scrap,
+            number(get(amountStruct,"Scraps"),0,CFG.MaxCoinsPerDrop) or 0)
+        local asset
+        pcall(function() asset=actor:GetConstructAssetData() end)
+        local quality=enum(get(actor,"ConstructQuality"))
+        if quality==nil then quality=enum(get(inspected,"Quality")) end
+        local valueField=quality==2 and "Parsed_ScrapValue_Epic"
+            or quality==1 and "Parsed_ScrapValue_Rare"
+            or "Parsed_ScrapValue_Common"
+        local assetValue=get(asset,valueField)
+        scrap=math.max(scrap,
+            number(get(assetValue,"Scraps"),0,CFG.MaxCoinsPerDrop) or 0)
+        local xp=math.max(
+            number(get(inspected,"XP"),0,CFG.MaxCoinsPerDrop) or 0,
+            number(get(asset,"XP"),0,CFG.MaxCoinsPerDrop) or 0)
+        if scrap>=CFG.StoryValuableMinScraps or
+           xp>=CFG.StoryValuableMinXP then
+            local derivedGold=scrap>=CFG.StoryValuableMinScraps
+                and math.floor(scrap*CFG.StoryValueGoldFromScraps)
+                or math.max(1,math.floor(xp/CFG.StoryValueGoldFromXPDivisor))
+            local id=path(actor) or ""
+            local valuableQuality=quality==1 or quality==2 or
+                id:lower():find("treasure",1,true)~=nil
+            local derivedArtifacts=valuableQuality and
+                math.max(1,math.floor(scrap/CFG.StoryArtifactScrapsPerCoin)) or 0
+            return {gold=derivedGold,artifacts=derivedArtifacts,
+                source="story-valuables-scrap-xp-conversion"}
         end
     end
     return inspectedZero
