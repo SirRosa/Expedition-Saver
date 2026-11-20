@@ -148,7 +148,11 @@ local function game()
     -- Do not touch the normal game. GameModeType is the authoritative check.
     local gm=enum(get(gs,"GameModeType"))
     local sg=enum(get(save,"GameMode"))
-    if gm~=1 then return nil end -- GameState is authoritative; save may lag
+    local metadataMode=enum(get(get(save,"MetaData"),"GameMode"))
+    -- Some transitions leave GameState.GameModeType unset while the
+    -- underlying SaveGame still identifies a valid Expedition. Require two
+    -- independent saved indicators if the live GameState disagrees.
+    if gm~=1 and not (sg==1 and metadataMode==1) then return nil end
     local run=get(gs,"CurrentDungeonRun")
     if not run then return nil end
     return {gi=gi,gs=gs,save=save,run=run,
@@ -748,14 +752,16 @@ if CFG.EnableNoPermadeath then
         function() end,
         safePostBool(function(context)
             local gs=unwrap(context)
-            if onHost() and valid(gs) and enum(get(gs,"GameModeType"))==1 then
+            local ctx=onHost() and game()
+            if valid(gs) and ctx and path(ctx.gs)==path(gs) then
                 return false
             end
         end))
     hook("/Script/Helden.HeldenGameState:EndDungeonRunSequence_Multicast",
         safePre("EndDungeonRunSequence",function(context,statsArg)
             local gs=unwrap(context)
-            if not onHost() or enum(get(gs,"GameModeType"))~=1 then return end
+            local ctx=onHost() and game()
+            if not ctx or path(ctx.gs)~=path(gs) then return end
             local stats=unwrap(statsArg)
             if get(stats,"bHaveFailed")==true then
                 S.failed=true;S.recoveryRequired=true
