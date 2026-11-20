@@ -990,7 +990,7 @@ local function spawnMoney(world,position,actorClass,amount,currency)
     if not valid(world) or not valid(actorClass) or amount<=0 then return false end
     -- Spawn above destroyed furniture so collision/physics can't bury the
     -- item inside the floor. v0.3 spawned at the old actor's pivot.
-    local coinPosition={X=position.X,Y=position.Y,Z=position.Z+130}
+    local coinPosition={X=position.X,Y=position.Y,Z=position.Z+55}
     local ok,coin=pcall(function()
         return world:SpawnActor(actorClass,coinPosition,{Pitch=0,Yaw=0,Roll=0})
     end)
@@ -1041,11 +1041,28 @@ local function spawnMoney(world,position,actorClass,amount,currency)
     pcall(function() coin:K2_SetActorLocation(coinPosition,false,{},true) end)
     local actualPosition=location(coin)
     local mesh=get(coin,"RootMesh")
-    local meshVisible
+    local meshVisible,simulatesPhysics,hasGravity
     if valid(mesh) then
+        -- A visible collidable actor without simulating mesh is static. v0.4
+        -- forgot SetSimulatePhysics/SetEnableGravity, so coins hung in air.
+        put(coin,"bCanSimulatePhysics",true)
+        pcall(function() mesh:SetMobility(2) end) -- Movable
         pcall(function() mesh:SetVisibility(true,true) end)
         pcall(function() mesh:SetCollisionEnabled(3) end)
+        local physicsOk,physicsErr=pcall(function() mesh:SetSimulatePhysics(true) end)
+        local gravityOk,gravityErr=pcall(function() mesh:SetEnableGravity(true) end)
+        pcall(function() mesh:WakeAllRigidBodies() end)
+        pcall(function() coin:ForceNetUpdate() end)
         pcall(function() meshVisible=mesh:IsVisible() end)
+        pcall(function() simulatesPhysics=mesh:IsSimulatingPhysics() end)
+        pcall(function() hasGravity=mesh:IsGravityEnabled() end)
+        if not physicsOk or not gravityOk or simulatesPhysics==false then
+            log("COIN PHYSICS ERROR "..currency.." simulateCall="..tostring(physicsOk)..
+                " gravityCall="..tostring(gravityOk)..
+                " simulated="..tostring(simulatesPhysics)..
+                " simulateError="..tostring(physicsErr)..
+                " gravityError="..tostring(gravityErr))
+        end
     end
     S.coinsLocated=S.coinsLocated+1
     if S.coinsLocated<=25 then
@@ -1059,7 +1076,9 @@ local function spawnMoney(world,position,actorClass,amount,currency)
             " replicatedCall="..tostring(replicated)..
             " unhiddenCall="..tostring(visible)..
             " collisionCall="..tostring(collision)..
-            " meshVisible="..tostring(meshVisible))
+            " meshVisible="..tostring(meshVisible)..
+            " simulatesPhysics="..tostring(simulatesPhysics)..
+            " gravity="..tostring(hasGravity))
     end
     return true
 end
