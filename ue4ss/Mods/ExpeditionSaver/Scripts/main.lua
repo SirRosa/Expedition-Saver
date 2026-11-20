@@ -13,6 +13,10 @@ local CFG = {
     InventoryRecoveryRetryTicks = 6,
     MaxInventoryRecoveryTicks = 24,
     EnableMoneyRecovery = true,
+    CleanupNativeDeathCoins = true, -- strictly proven currency drops, NEVER equipment
+    DeathCoinRadius = 240, -- centimeters
+    DeathCoinMaxAgeSeconds = 12,
+    DeathCoinScanTicks = 40, -- 12 seconds on the 300ms engine timer
     EnableNoPermadeath = true,
     EnablePhysicalCoins = true,
     RespawnDelaySeconds = 0.15,
@@ -201,6 +205,7 @@ local S={
     deathEvents=0,newPawnEvents=0,rewardEvents=0,rawDeathEvents=0,rawDestroyEvents=0,heartbeatTicks=1000,machineRepairCycle=1000,
     players={},recoveries={},observedDeaths=0,failedBarriers=0,coinsLocated=0,
     unresolvedTreasureLogs=0,
+    coinBaseline={},coinBaselineCycle=0,currencyCleanup={},
     failureChecks=0
 }
 local function backupFile(slot)
@@ -246,6 +251,7 @@ local function resetForSave(ctx,key,slot)
     local oldPending=S.pending
     local oldPlayers=S.players
     local oldRecoveries=S.recoveries
+    local oldCurrencyCleanup=S.currencyCleanup
     local preserve=oldSlot==slot and (S.recoveryRequired or S.active or next(oldPending)~=nil)
     local oldDepth,oldSeed,oldOffset,oldActive,oldFailed=
         S.depth,S.highestSeed,S.offset,S.active,S.failed
@@ -259,6 +265,8 @@ local function resetForSave(ctx,key,slot)
     S.phase=nil;S.pending=preserve and oldPending or {};S.coinLedger={}
     S.players=preserve and oldPlayers or {}
     S.recoveries=preserve and oldRecoveries or {}
+    S.currencyCleanup=preserve and oldCurrencyCleanup or {}
+    S.coinBaseline={};S.coinBaselineCycle=0
     S.nextBackupDepth=-1
     S.dropQueue={};S.destructionSeen={}
     S.nextMachineRepair=0;S.machineRepairAttempts=0
@@ -366,6 +374,128 @@ local function recoverMoney(pawn,entry)
     end
     return verified
 end
+-- Record coin actors while players are alive. Unlike inventory items, these
+-- baseline refs are never mutated or destroyed and impose no per-frame hook.
+local function snapshotExistingCoins()
+    if not CFG.CleanupNativeDeathCoins then return end
+    local existing={}
+    for _,coin in ipairs(all("HeldenPhysicsCoin")) do
+        if valid(coin) then
+            local id=path(coin)
+            if id then existing[id]=true end
+        end
+    end
+    S.coinBaseline=existing
+end
+
+-- Native death coins can remain in the dungeon after the wallet is restored.
+-- Only zero and destroy a *complete exact match* of new physical coins close
+-- to the death point, after checking the new player already owns the money.
+-- Never touch equipable items, normal pickups, or unrelated coins.
+local function processCurrencyCleanup()
+    if not CFG.CleanupNativeDeathCoins or not CFG.EnableMoneyRecovery or
+       not onHost() then return end
+    for key,job in pairs(S.currencyCleanup) do
+        job.ticks=job.ticks+1
+        if not valid(job.pawn) or not job.at then
+            S.currencyCleanup[key]=nil
+        else
+            local target=job.money
+            local funded=true
+            local wallet=snapshotMoney(job.pawn)
+            for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
+                if not wallet or wallet[currency]<(target[currency] or 0) then
+                    funded=false
+                end
+            end
+            if funded then
+                local seen={}
+                local totals={Gold=0,Artifacts=0,Scraps=0}
+                local ambiguous=false
+                for _,coin in ipairs(all("HeldenPhysicsCoin")) do
+                    local id=valid(coin) and path(coin) or nil
+                    if id and not job.oldCoins[id] and
+                       not id:find("Default__",1,true) then
+                        local at=location(coin)
+                        if at and distance2(at,job.at)<=
+                           CFG.DeathCoinRadius*CFG.DeathCoinRadius then
+                            local age
+                            pcall(function() age=coin:GetGameTimeSinceCreation() end)
+                            if type(age)=="number" and age>=0 and
+                               age<=CFG.DeathCoinMaxAgeSeconds then
+                                local money=get(coin,"Money")
+                                local values={}
+                                local good=money~=nil
+                                local positive=false
+                                for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
+                                    local n=number(get(money,currency),0,100000000)
+                                    if n==nil then good=false end
+                                    values[currency]=n or 0
+                                    if n and n>0 then positive=true end
+                                end
+                                if good and positive then
+                                    local world
+                                    pcall(function() world=coin:GetWorld() end)
+                                    if not job.world or not valid(world) or
+                                       path(world)==job.world then
+                                        local fits=true
+                                        for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
+                                            if totals[currency]+values[currency]>
+                                               (target[currency] or 0) then fits=false end
+                                        end
+                                        if fits then
+                                            seen[#seen+1]={actor=coin,id=id}
+                                            for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
+                                                totals[currency]=totals[currency]+values[currency]
+                                            end
+                                        else ambiguous=true end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+                local exact=#seen>0 and not ambiguous
+                for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
+                    if totals[currency]~=(target[currency] or 0) then exact=false end
+                end
+                if exact then
+                    local cleared=0
+                    for _,match in ipairs(seen) do
+                        local coin=match.actor
+                        local money=get(coin,"Money")
+                        local zero=true
+                        for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
+                            zero=put(money,currency,0) and zero
+                        end
+                        local actual=get(coin,"Money")
+                        for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
+                            if number(get(actual,currency),0,100000000)~=0 then
+                                zero=false
+                            end
+                        end
+                        if zero then
+                            local ok=pcall(function() coin:K2_DestroyActor() end)
+                            if ok then cleared=cleared+1
+                            else log("DEATH COINS zeroed, destroy failed "..match.id) end
+                        else
+                            log("DEATH COINS WARNING: cannot zero coin "..match.id)
+                        end
+                    end
+                    log("DEATH COINS matched="..#seen.." cleared="..cleared..
+                        " Gold="..totals.Gold.." Artifacts="..totals.Artifacts..
+                        " Scraps="..totals.Scraps.." itemsUntouched=true")
+                    S.currencyCleanup[key]=nil
+                end
+            end
+            if S.currencyCleanup[key] and job.ticks>=CFG.DeathCoinScanTicks then
+                log("DEATH COINS UNRESOLVED: no certain full drop match; no coins destroyed")
+                S.currencyCleanup[key]=nil
+            end
+        end
+    end
+end
+
 local function gearOf(char)
     if not valid(char) then return {} end
     local result,seen={},{}
@@ -429,8 +559,18 @@ local function queuePlayerDeath(pc,char,snapshot,reason)
     local inv=snapshot or gearOf(char)
     local tracked=S.players[key]
     local cash=(tracked and tracked.money) or snapshotMoney(char)
+    local deathPos=(tracked and tracked.lastLocation) or location(char)
+    local worldName=tracked and tracked.lastWorld
+    if not worldName and valid(char) then
+        local w
+        pcall(function() w=char:GetWorld() end)
+        if valid(w) then worldName=path(w) end
+    end
+    local oldCoins={}
+    for id in pairs(S.coinBaseline) do oldCoins[id]=true end
     S.pending[key]={controller=pc,oldChar=char,gear=inv,money=cash,
         started=os.clock(),ageTicks=0,attempts=0,nextRequestTick=0,
+        deathPos=deathPos,deathWorld=worldName,oldCoins=oldCoins,
         spawned=nil,delivered=false}
     S.deathEvents=S.deathEvents+1
     log("PLAYER DEATH queued from "..tostring(reason).." controller="..key..
@@ -454,7 +594,8 @@ local function monitorPlayers(ctx)
             local tracking=S.players[key]
             if not tracking then
                 tracking={alive=false,dead=false,lastPawn=nil,gear={},money=nil,
-                    snapshotCycle=0,lastState=nil,lastHealth=nil}
+                    snapshotCycle=0,lastState=nil,lastHealth=nil,
+                    lastLocation=nil,lastWorld=nil}
                 S.players[key]=tracking
             end
             local pawn=currentPawn(pc)
@@ -489,6 +630,15 @@ local function monitorPlayers(ctx)
             if activeCharacter then
                 tracking.lastPawn=char
                 tracking.money=snapshotMoney(char) or tracking.money
+                tracking.lastLocation=location(char) or tracking.lastLocation
+                local w
+                pcall(function() w=char:GetWorld() end)
+                if valid(w) then tracking.lastWorld=path(w) end
+                S.coinBaselineCycle=S.coinBaselineCycle+1
+                if S.coinBaselineCycle>=4 then
+                    S.coinBaselineCycle=0
+                    snapshotExistingCoins()
+                end
                 tracking.alive=true
                 tracking.dead=false
                 tracking.snapshotCycle=tracking.snapshotCycle+1
@@ -560,6 +710,13 @@ local function collectAtElevator(entry,dest,pawn)
     S.recoveries[key]={entry=entry,dest=dest,pawn=pawn,tick=0,
         done={},attempts={},recreated={},warnings={}}
     recoverMoney(pawn,entry)
+    if CFG.CleanupNativeDeathCoins and CFG.EnableMoneyRecovery and
+       entry.money and entry.deathPos then
+        S.currencyCleanup[key]={
+            pawn=pawn,money=entry.money,at=entry.deathPos,
+            oldCoins=entry.oldCoins or {},world=entry.deathWorld,ticks=0
+        }
+    end
     log("INVENTORY RECOVERY queued items="..#entry.gear..
         " cash="..(entry.money and
             entry.money.Gold.."/"..entry.money.Artifacts.."/"..entry.money.Scraps or "unknown"))
@@ -1307,6 +1464,7 @@ local function poll()
     monitorPlayers(ctx)
     processDeaths(ctx)
     processInventoryRecoveries()
+    processCurrencyCleanup()
     repairElevator(ctx)
     repairFailedDoor(ctx)
     processDropQueue()
