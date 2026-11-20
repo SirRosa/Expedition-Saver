@@ -2,7 +2,7 @@ name: Expedition Saver — validate, test and package
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/death-currency-duplication, feature/direct-rewards-performance, fix/story-respawn-rewards-and-death-dup-v07, fix/nearest-recipient-no-physical-rewards, fix/story-loot-stutter-v072, fix/story-currency-event-perf-v073]
   pull_request:
   workflow_dispatch:
 
@@ -26,18 +26,18 @@ jobs:
         run: lua5.4 tests/test_mapper.lua
       - name: Expedition Saver syntax check
         run: luac5.4 -p ue4ss/Mods/ExpeditionSaver/Scripts/main.lua tests/test_expedition.lua
-      - name: Test Expedition Saver 45 gameplay regression cases
+      - name: Test Expedition Saver gameplay regression cases incl. currency dedup
         run: lua5.4 tests/test_expedition.lua
       - name: Package mapper (read-only diagnostic)
         run: |
           mkdir -p out
           zip -r out/ExpeditionMapper-v0.1.0.zip ue4ss/Mods/ExpeditionMapper/
           unzip -t out/ExpeditionMapper-v0.1.0.zip
-          zip -r out/ExpeditionSaver-v0.5.0-alpha.zip ue4ss/Mods/ExpeditionSaver/
-          unzip -t out/ExpeditionSaver-v0.5.0-alpha.zip
+          zip -r out/ExpeditionSaver-v0.7.3-story-coin-events-test.zip ue4ss/Mods/ExpeditionSaver/
+          unzip -t out/ExpeditionSaver-v0.7.3-story-coin-events-test.zip
       - name: Publish install ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: ExpeditionSaver-v0.5.0-alpha
-          path: out/ExpeditionSaver-v0.5.0-alpha.zip
+          name: ExpeditionSaver-v0.7.3-story-coin-events-test
+          path: out/ExpeditionSaver-v0.7.3-story-coin-events-test.zip
           if-no-files-found: error
