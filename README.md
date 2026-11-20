@@ -1,5 +1,18 @@
 # Grain Rot — Expedition Saver
 
+## v0.7.7 — naprawa okna CMD i opóźnienia dźwięku respawnu
+
+**Regresja v0.7.6:** `os.execute` uruchamiał pośrednio systemowy `cmd.exe`, powodując wyskakujące okno podczas rozgrywki i opóźnienie uruchomienia odtwarzacza.
+
+**Rozwiązanie:** `package.loadlib` ładuje **raz na starcie** `Audio/respawn_audio.dll`. Ta DLL wywołuje bezpośrednio `PlaySoundW(..., SND_ASYNC)`, czyli uruchamia odtwarzanie natychmiastowo i zwraca kontrolę bez czekania na zakończenie dźwięku. Nie używa procesu EXE, CMD, PowerShell, ani `os.execute`. Stary plik `respawn_audio.exe` można usunąć.
+
+**Host i klient:** bez zmian w mechanice sieciowej, każda instalacja odtwarza dźwięk **tylko własnego gracza**. Na kliencie dodatkowo reaguje natychmiast na `OnNewPawn` i replikowane przywrócenie postaci, bez czekania na kolejny timer 300 ms. Zawiera dokładny WAV przesłany przez użytkownika (~1,89 s).
+
+**Instalacja:** ten sam pełny ZIP na komputerze hosta **i** klienta; w `ue4ss/Mods/ExpeditionSaver/Audio/` muszą znaleźć się `respawn.wav` i `respawn_audio.dll`. Pozostałe funkcje respawnu, dropu przedmiotów i walut są niezmienione.
+
+GitHub Actions uruchamia symulacje UE4SS oraz kompilację i wywołanie DLL na Windows x64. **Dźwięk i płynność w rzeczywistej grze nie zostały jeszcze potwierdzone.**
+
+
 ## v0.7.6 — Re:Zero return-by-death: dźwięk hosta **i klienta**
 
 - Podmieniono źródło audio na dokładny WAV użytkownika (1,886 s, stereo, 44,1 kHz, PCM16). Plik **jest dostarczony w pełnym ZIP-ie instalacyjnym**, a nie w publicznym kodzie GitHub.
