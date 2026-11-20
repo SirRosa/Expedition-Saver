@@ -167,7 +167,7 @@ local S={
     sample=0,lastPoll=-1,nextBackupDepth=-1,
     nextBackupTime=-1,coinLedger={},respawned=0,
     lastMode="unknown",lastDisplay=nil,warned=false,
-    lastHeartbeat=0,lastGuard=nil,recoveryRequired=false,
+    lastHeartbeat=-1000,lastGuard=nil,recoveryRequired=false,
     nextMachineRepair=0,machineRepairAttempts=0,
     dropQueue={},destructionSeen={},dropAttempt=0,
     deathEvents=0,newPawnEvents=0,rewardEvents=0
