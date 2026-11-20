@@ -15,7 +15,12 @@ local function fixture()
     local save=actor({_name="SaveGame /Game/S0",MetaData=md,GameMode=1,
         DungeonLevel=2,TimePlayed=30,DungeonFails=0})
     local gi=actor({_name="HeldenGameInstance /Game/Instance",CurrentSaveGame=save})
-    local lift=actor({_name="HeldenDungeonElevator /Game/Lift",InteriorCollisionBox=actor()})
+    local lift=actor({_name="HeldenDungeonElevator /Game/Lift",InteriorCollisionBox=actor(),
+        HomeStationIdx=0,CurrentStationIdx=0,bInteractionLocked=false})
+    local machine=actor({_name="HeldenElevatorMachine /Game/Machine",bInteractionLocked=true})
+    function machine:SetCanBeInteracted_Auth(value) self.interactionEnabled=value end
+    function machine:OnRequirementSysUpdate_Auth() end
+    function machine:OnDungeonRunStateChanged(r) self.lastRun=r.State end
     function lift.InteriorCollisionBox:K2_GetComponentLocation()
         return {X=1000,Y=2000,Z=300}
     end
@@ -23,6 +28,7 @@ local function fixture()
     local run={State=2,Flags=0,DungeonActor=dungeon}
     local gs=actor({_name="HeldenGameState /Game/GS",GameModeType=1,bExpeditionFailed=false,
         CurrentDungeonRun=run})
+    function gs:OnRep_DungeonRunState() self.repCount=(self.repCount or 0)+1 end
     local stats=actor({CurrentHealth=0,TotalStats={MaxHealth=120}})
     local corpse=actor({_name="HeldenCharacter /Game/Old",EquipedItems={},CharacterStats=stats})
     local newPawn=actor({_name="HeldenPlayerCharacter /Game/New",CharacterStats=
@@ -53,13 +59,25 @@ local function fixture()
     corpse.EquipedItems={item}
     registry.GameModeBase=gm;registry.HeldenGameInstance=gi
     registry.HeldenGameState=gs;registry.HeldenDungeonElevator=lift
+    registry.HeldenElevatorMachine=machine
+    registry.HeldenGameMode=gm
     local data=actor({_name="DataSingleton /Game/DS"})
     local coinClass=actor({_name="Class /Game/BP_ArtifactCoin"})
+    local goldClass=actor({_name="Class /Game/BP_GoldCoin"})
     data.ArtifactCoinActorClass=coinClass
+    data.GoldCoinActorClass=goldClass
+    local physTable=actor()
+    function physTable:FindRow(key)
+        if tostring(key)=="RustyJunk" then
+            return {Parsed_ScrapReward={Gold=45,Artifacts=2,Scraps=1}}
+        end
+    end
+    data.PhysActorDataTable=physTable
     registry.HeldenDataSingleton=data
-    local loot=actor({_name="ConstructActor /Game/EpicLoot",ConstructQuality=2})
+    local loot=actor({_name="HeldenConstructActor /Game/EpicLoot",ConstructQuality=2,
+        OwningDungeon=dungeon,StatsComponent=actor({CurrentHealth=0})})
     function loot:K2_GetActorLocation() return {X=1000,Y=1980,Z=300} end
-    function loot:GetInspectData() return {bIsInDungeon=true,Value={Artifacts=6}} end
+    function loot:GetInspectData() return {bIsInDungeon=true,Value={Gold=20,Artifacts=6,Scraps=5}} end
     function loot:K2_DestroyActor() self._valid=false end
     local itComp=actor()
     function itComp:GetOwner() return loot end
@@ -68,7 +86,7 @@ local function fixture()
     local world=actor({_name="World /Game/World"})
     function loot:GetWorld() return world end
     function world:SpawnActor(cls,loc,rot)
-        assert(cls==coinClass)
+        assert(cls==coinClass or cls==goldClass)
         local coin=actor({Money={Artifacts=0,Gold=0,Scraps=0}})
         function coin:K2_DestroyActor() self._valid=false end
         spawned[#spawned+1]={coin=coin,loc=loc}
@@ -94,7 +112,10 @@ local function fixture()
         print=function(msg) logs[#logs+1]=msg end,
         FindFirstOf=function(cls) counts.first=counts.first+1;return registry[cls] end,
         FindAllOf=function(cls) counts.all=counts.all+1;return listing[cls] or {} end,
-        RegisterHook=function(name,pre,post) hooks[name]={pre=pre,post=post} end,
+        RegisterHook=function(name,pre,post)
+            hooks[name]={pre=pre,post=post}
+            return 100,101
+        end,
         RegisterKeyBind=function(key,callback) keys[key]=callback end,
         Key={F7=118},
         LoopInGameThreadWithDelay=function(ms,callback)
@@ -107,7 +128,7 @@ local function fixture()
     assert(clockcb,"game-thread timer not registered")
     local test={
         gm=gm,save=save,md=md,gi=gi,gs=gs,run=run,
-        lift=lift,pc=pc,corpse=corpse,newPawn=newPawn,item=item,loot=loot,
+        lift=lift,machine=machine,pc=pc,corpse=corpse,newPawn=newPawn,item=item,loot=loot,
         world=world,registry=registry,listing=listing,spawned=spawned,
         hooks=hooks,keys=keys,logs=logs,files=files,counts=counts,
         tick=function(dt) now=now+(dt or 0.7);clockcb() end,
@@ -116,9 +137,12 @@ local function fixture()
             assert(h and h.pre)
             h.pre(corpse)
         end,
-        convert=function()
-            assert(keys[118],"F7 missing")
-            keys[118]()
+        destroyLoot=function()
+            local h=hooks["/Script/Helden.HeldenPhysicsActor:OnHealthModifed"]
+            local d=hooks["/Script/Helden.HeldenPhysicsActor:PlayDestructionEffect_Mulitcast"]
+            assert(h and d,"destruction hooks not registered")
+            h.pre(loot)
+            d.pre(loot)
         end,
         switchMode=function(mode)
             gs.GameModeType=mode;save.GameMode=mode;md.GameMode=mode
@@ -197,41 +221,82 @@ test("AI character death is ignored",function()
     t.tick(2)
     assert(t.counts.respawn==0)
 end)
-test("F7 destroys Epic loot only after creating physical coin with correct value",function()
+test("hammer destruction automatically emits the original extraction values",function()
     local t=fixture();t.tick()
-    t.convert()
-    assert(#t.spawned==1)
-    assert(t.spawned[1].coin.Money.Artifacts==6)
-    assert(t.spawned[1].coin.Money.Gold==0)
-    assert(t.loot._valid==false)
+    t.destroyLoot()
+    t.tick(1)
+    assert(#t.spawned==2,"should drop gold and artifact coin actors")
+    assert(t.spawned[1].coin.Money.Gold==20)
+    assert(t.spawned[2].coin.Money.Artifacts==6)
+    assert(t.loot._valid~=false,"mod must not destroy loot itself")
+    assert(t.keys[118]==nil,"F7 must not be registered")
 end)
-test("F7 double press cannot duplicate coins",function()
-    local t=fixture();t.tick();t.convert();t.convert()
-    assert(#t.spawned==1)
-end)
-test("F7 never converts a non-Epic object",function()
+test("two destruction signals never double-pay the same loot",function()
     local t=fixture();t.tick()
-    t.loot.ConstructQuality=1
-    t.convert()
-    assert(#t.spawned==0 and t.loot._valid~=false)
+    t.destroyLoot();t.destroyLoot();t.tick(1)
+    assert(#t.spawned==2)
+    t.tick(1);assert(#t.spawned==2)
 end)
-test("F7 never converts a non-Artifact reward or outpost loot",function()
+test("scrap/resource payout remains native, no added scrap coin",function()
+    local t=fixture();t.tick();t.destroyLoot();t.tick(1)
+    assert(#t.spawned==2)
+    assert(t.spawned[1].coin.Money.Scraps==0)
+    assert(t.spawned[2].coin.Money.Scraps==0)
+end)
+test("no rewards for actor outside dungeon",function()
     local t=fixture();t.tick()
-    t.loot.GetInspectData=function() return {bIsInDungeon=true,Value={Artifacts=0}} end
-    t.convert();assert(#t.spawned==0)
-    t.loot.GetInspectData=function() return {bIsInDungeon=false,Value={Artifacts=9}} end
-    t.convert();assert(#t.spawned==0)
+    t.loot.OwningDungeon=nil
+    t.loot.GetInspectData=function() return {bIsInDungeon=false,Value={Gold=40,Artifacts=8}} end
+    t.destroyLoot();t.tick(1)
+    assert(#t.spawned==0)
 end)
-test("F7 disabled if world or coin class missing: no loot loss",function()
+test("no payout for zero coin value",function()
+    local t=fixture();t.tick()
+    t.loot.GetInspectData=function() return {bIsInDungeon=true,Value={Gold=0,Artifacts=0,Scraps=10}} end
+    t.destroyLoot();t.tick(1)
+    assert(#t.spawned==0)
+end)
+test("missing physical currency asset cannot invent the reward",function()
     local t=fixture();t.tick()
     t.registry.HeldenDataSingleton.ArtifactCoinActorClass=nil
-    t.convert()
-    assert(#t.spawned==0 and t.loot._valid~=false)
+    t.destroyLoot();t.tick(10)
+    assert(#t.spawned==1,"Gold may succeed, but Artifact Coins must not be invented")
 end)
-test("F7 not enabled outside active Expedition",function()
+test("PhysActorData fallback reads already patched QOL reward, without multiplying",function()
     local t=fixture();t.tick()
-    t.run.State=0;t.convert();assert(#t.spawned==0)
-    t.run.State=2;t.switchMode(0);t.convert();assert(#t.spawned==0)
+    t.loot.GetInspectData=nil
+    t.loot.ConstructDataName="RustyJunk"
+    t.destroyLoot();t.tick(1)
+    assert(#t.spawned==2)
+    assert(t.spawned[1].coin.Money.Gold==45)
+    assert(t.spawned[2].coin.Money.Artifacts==2)
+end)
+test("hammer destruction below health zero is required for health trigger",function()
+    local t=fixture();t.tick()
+    t.loot.StatsComponent.CurrentHealth=10
+    local h=t.hooks["/Script/Helden.HeldenPhysicsActor:OnHealthModifed"]
+    h.pre(t.loot);t.tick(1)
+    assert(#t.spawned==0)
+    t.loot.StatsComponent.CurrentHealth=0
+    h.pre(t.loot);t.tick(1)
+    assert(#t.spawned==2)
+end)
+test("elevator machine is unlocked after expedition wipe at home station",function()
+    local t=fixture();t.tick()
+    t.run.State=3;t.run.Flags=1;t.md.bHasFailed=true
+    t.tick(2)
+    assert(t.run.State==0,"run must leave EndScreen")
+    assert(t.run.Flags==0,"stale failure must be cleared")
+    assert(t.machine.interactionEnabled==true)
+    assert(t.machine.bInteractionLocked==false)
+end)
+test("elevator recovery defers if elevator has not reached home station",function()
+    local t=fixture();t.tick()
+    t.lift.CurrentStationIdx=1
+    t.run.State=3;t.run.Flags=1;t.md.bHasFailed=true
+    t.tick(2)
+    assert(t.run.State==3)
+    assert(not t.machine.interactionEnabled)
 end)
 test("client-only mode never changes save or coins",function()
     local t=fixture();t.tick()
@@ -240,7 +305,7 @@ test("client-only mode never changes save or coins",function()
     t.md.bHasFailed=true;t.gs.bExpeditionFailed=true
     t.tick()
     assert(t.md.bHasFailed and t.gs.bExpeditionFailed)
-    t.convert();assert(#t.spawned==0)
+    t.destroyLoot();t.tick(1);assert(#t.spawned==0)
 end)
 test("a timer is independent of animation callback after all players die",function()
     local t=fixture()
@@ -261,7 +326,7 @@ end)
 test("do not convert Epic quest artifacts",function()
     local t=fixture();t.tick()
     t.loot.bIsQuestObjective=true
-    t.convert()
+    t.destroyLoot();t.tick(1)
     assert(#t.spawned==0 and t.loot._valid~=false)
 end)
 
