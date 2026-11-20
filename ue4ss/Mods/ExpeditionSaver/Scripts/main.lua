@@ -601,6 +601,7 @@ end
 local function monitorPlayers(ctx)
     if not CFG.EnableRespawn or not (ctx.phase==2 or
         (ctx.phase==3 and (ctx.failed or S.active))) then return end
+    local anyAlive=false
     for _,pc in ipairs(all("HeldenPlayerController")) do
         if valid(pc) then
             local key=path(pc)
@@ -641,17 +642,13 @@ local function monitorPlayers(ctx)
             tracking.lastState=state
             tracking.lastHealth=health
             if activeCharacter then
+                anyAlive=true
                 tracking.lastPawn=char
                 tracking.money=snapshotMoney(char) or tracking.money
                 tracking.lastLocation=location(char) or tracking.lastLocation
                 local w
                 pcall(function() w=char:GetWorld() end)
                 if valid(w) then tracking.lastWorld=path(w) end
-                S.coinBaselineCycle=S.coinBaselineCycle+1
-                if S.coinBaselineCycle>=4 then
-                    S.coinBaselineCycle=0
-                    snapshotExistingCoins()
-                end
                 tracking.alive=true
                 tracking.dead=false
                 tracking.snapshotCycle=tracking.snapshotCycle+1
@@ -669,6 +666,14 @@ local function monitorPlayers(ctx)
                     log("PLAYER DEAD but no prior alive snapshot; waiting for native event")
                 end
             end
+        end
+    end
+    -- One registry scan at most every 4 poll cycles, regardless of player count.
+    if anyAlive then
+        S.coinBaselineCycle=S.coinBaselineCycle+1
+        if S.coinBaselineCycle>=4 then
+            S.coinBaselineCycle=0
+            snapshotExistingCoins()
         end
     end
 end
