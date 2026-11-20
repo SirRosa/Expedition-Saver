@@ -608,4 +608,74 @@ test("end-of-run failure queues a tracked player even when original actor vanish
     assert(t.counts.respawn==1,"failed run must not require old Pawn still existing")
 end)
 
+test("all three carried currencies survive a normal native respawn",function()
+    local t=fixture();t.tick(0);t.killed()
+    for i=1,6 do t.tick(0) end
+    assert(t.newPawn.Money.Gold==80)
+    assert(t.newPawn.Money.Artifacts==4)
+    assert(t.newPawn.Money.Scraps==17)
+    for i=1,5 do t.tick(0) end
+    assert(t.newPawn.Money.Gold==80 and t.newPawn.Money.Artifacts==4,
+        "restoring money twice must not duplicate currency")
+end)
+test("native respawn keeps higher balances while recovering missing currencies",function()
+    local t=fixture();t.newPawn.Money.Gold=150;t.newPawn.Money.Artifacts=2
+    t.tick(0);t.killed()
+    for i=1,5 do t.tick(0) end
+    assert(t.newPawn.Money.Gold==150)
+    assert(t.newPawn.Money.Artifacts==4)
+    assert(t.newPawn.Money.Scraps==17)
+end)
+test("inventory slots not listed under EquipedItems are also recovered",function()
+    local t=fixture()
+    local item2=actor({_name="HeldenEquipableItem /Game/B",CurrentInventorySlot=1,
+        PreviousOwner=t.corpse,CurrentSlot=actor({_name="OldSlot2"})})
+    function item2:GetClass() return t.item:GetClass() end
+    function item2:DetachFromAll() self.CurrentSlot=nil end
+    function item2:SetSimulatePhysics(v) end
+    function item2:K2_TeleportTo(v) self.location=v;return true end
+    item2.Interact=t.item.Interact
+    t.corpse.ItemSlots[2]=actor({CurrentItemInSlot=item2})
+    t.listing.HeldenEquipableItem[2]=item2
+    t.corpse.CharacterState=0;t.corpse.CharacterStats.CurrentHealth=120
+    t.tick(0)
+    t.corpse.CharacterState=1;t.corpse.CharacterStats.CurrentHealth=0
+    for i=1,8 do t.tick(0) end
+    assert(t.newPawn.ItemSlots[1].CurrentItemInSlot==t.item)
+    assert(t.newPawn.ItemSlots[2].CurrentItemInSlot==item2)
+    assert(item2.PreviousOwner==t.newPawn)
+end)
+test("default physics treasure uses mesh-matched live QOL PhysActorData reward",function()
+    local t=fixture();t.tick(0)
+    t.loot.GetInspectData=function()
+        return {bIsInDungeon=true,Value={Gold=0,Artifacts=0,Scraps=0}}
+    end
+    t.loot.GetConstructAssetData=function()
+        return {Parsed_ScrapValue_Epic={Gold=0,Artifacts=0}}
+    end
+    local m=actor({_name="StaticMesh /Game/TreasureMesh"})
+    t.loot.RootMesh=actor({StaticMesh=m})
+    t.registry.HeldenDataSingleton.PhysTreasureContainer=
+        actor({TreasureData={{DataName="RustyJunk",StaticMesh=m}}})
+    t.destroyLoot();t.tick(0)
+    assert(#t.spawned==2,"generic treasure should not stop at zero ConstructAsset value")
+    assert(t.spawned[1].coin.Money.Gold==45)
+    assert(t.spawned[2].coin.Money.Artifacts==2)
+end)
+test("failed native pickup never destroys the only surviving item",function()
+    local t=fixture()
+    t.item.Interact=function() error("game rejected pickup") end
+    t.tick(0);t.killed()
+    for i=1,30 do t.tick(0) end
+    assert(t.item:IsValid())
+    assert(t.item.location and t.item.location.Z>=380,
+        "unrecovered object must still be at elevator")
+    assert(t.newPawn.ItemSlots[1].CurrentItemInSlot==nil)
+    local warned=false
+    for _,line in ipairs(t.logs) do
+        if line:find("floor_or_missing=1",1,true) then warned=true end
+    end
+    assert(warned,"must not falsely report fully restored inventory")
+end)
+
 print("ALL TESTS PASSED ("..passed..")")
