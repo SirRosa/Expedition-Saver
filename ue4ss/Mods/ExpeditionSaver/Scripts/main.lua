@@ -1,4 +1,4 @@
--- Expedition Saver v0.4.0-alpha | Grain Rot (Helden / UE4SS 3.x)
+-- Expedition Saver v0.5.0-alpha | Grain Rot (Helden / UE4SS 3.x)
 -- Host-authoritative only. This mod is EXPERIMENTAL; back up the save.
 -- The latest 2026-11-20 USMAP confirms fields and reflected signatures,
 -- not the exact native save/death sequence. Every mutation is checked.
@@ -8,8 +8,11 @@ local CFG = {
     MaxDepth = 10000,
     EnableRespawn = true,
     EnableItemRecovery = true,
-    RestoreDestroyedItems = false, -- avoid QOL insurance duplicate spawns until verified
-    MaxGearPerPlayer = 60,
+    RestoreDestroyedItems = true, -- only after native inventory reconciliation, with dedup
+    MaxGearPerPlayer = 64,
+    InventoryRecoveryRetryTicks = 6,
+    MaxInventoryRecoveryTicks = 24,
+    EnableMoneyRecovery = true,
     EnableNoPermadeath = true,
     EnablePhysicalCoins = true,
     RespawnDelaySeconds = 0.15,
@@ -325,28 +328,74 @@ end
 
 -- Record *existing* item actors, not classes or copies. No destructive array
 -- operations on the new pawn; we never create duplicated item instances.
+local function snapshotMoney(char)
+    if not valid(char) then return nil end
+    local money=get(char,"Money")
+    if not money then return nil end
+    local record={}
+    for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
+        record[currency]=number(get(money,currency),0,100000000) or 0
+    end
+    return record
+end
+local function recoverMoney(pawn,entry)
+    if not CFG.EnableMoneyRecovery or not entry.money or not valid(pawn) then return false end
+    local money=get(pawn,"Money")
+    if not money then log("MONEY: new pawn has no Money struct");return false end
+    local changed={}
+    local verified=true
+    for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
+        local expected=entry.money[currency] or 0
+        local current=number(get(money,currency),0,100000000)
+        if current~=nil and current<expected then
+            local ok=put(money,currency,expected)
+            local actual=get(pawn,"Money")
+            local after=number(get(actual,currency),0,100000000)
+            changed[#changed+1]=currency..":"..current.."->"..tostring(after)
+            verified=verified and ok and after~=nil and after>=expected
+        end
+    end
+    if #changed>0 then
+        log("MONEY RESTORE "..table.concat(changed,",")..
+            " verified="..tostring(verified))
+    else
+        diag("MONEY RESTORE none required")
+    end
+    return verified
+end
 local function gearOf(char)
+    if not valid(char) then return {} end
     local result,seen={},{}
-    local function add(item)
-        if not valid(item) then return end
+    local function add(item,source,slotIndex)
+        item=unwrap(item)
+        if not valid(item) or #result>=CFG.MaxGearPerPlayer then return end
         local id=path(item)
         if not id or seen[id] then return end
         seen[id]=true
-        if #result>=CFG.MaxGearPerPlayer then return end
         local cls
         pcall(function() cls=item:GetClass() end)
+        if not valid(cls) then return end
         local asset=get(item,"ItemDataAsset")
         result[#result+1]={ref=item,key=id,klass=cls,
-            classPath=valid(cls) and path(cls) or nil,
+            dynamicSaveName=asName(get(item,"DynamicSaveName")),
+            classPath=path(cls),
             asset=asset,assetPath=valid(asset) and path(asset) or nil,
             durability=tonumber(get(item,"ItemDurability")),
             enchant=get(item,"ItemEnchantment"),
-            slotIdx=number(get(item,"CurrentInventorySlot"),0,128)}
+            slotIdx=slotIndex or number(get(item,"CurrentInventorySlot"),0,128),
+            source=source}
     end
-    each(get(char,"EquipedItems"),add)
+    -- The game stores inventory items in BOTH EquipedItems and ItemSlots.
+    -- Previously the latter was missing, explaining 1 retained item in log.
+    each(get(char,"EquipedItems"),function(item,i) add(item,"EquipedItems",i-1) end)
+    each(get(char,"ItemSlots"),function(slot,i)
+        if valid(slot) then add(get(slot,"CurrentItemInSlot"),"ItemSlots",i-1) end
+    end)
+    local owner=path(char)
     for _,item in ipairs(all("HeldenEquipableItem")) do
-        if valid(item) and get(item,"PreviousOwner")==char and valid(get(item,"CurrentSlot")) then
-            add(item)
+        if valid(item) and path(get(item,"PreviousOwner"))==owner and
+           valid(get(item,"CurrentSlot")) then
+            add(item,"PreviousOwner")
         end
     end
     return result
@@ -372,12 +421,15 @@ local function queuePlayerDeath(pc,char,snapshot,reason)
     end
     if not player then return false end
     local inv=snapshot or gearOf(char)
-    S.pending[key]={controller=pc,oldChar=char,gear=inv,
+    local tracked=S.players[key]
+    local cash=(tracked and tracked.money) or snapshotMoney(char)
+    S.pending[key]={controller=pc,oldChar=char,gear=inv,money=cash,
         started=os.clock(),ageTicks=0,attempts=0,nextRequestTick=0,
         spawned=nil,delivered=false}
     S.deathEvents=S.deathEvents+1
     log("PLAYER DEATH queued from "..tostring(reason).." controller="..key..
         " oldPawn="..tostring(path(char)).." retained="..#inv..
+        " cash="..(cash and (cash.Gold.."/"..cash.Artifacts.."/"..cash.Scraps) or "nil")..
         " phase="..ctx.phase)
     return true
 end
@@ -395,7 +447,7 @@ local function monitorPlayers(ctx)
             local key=path(pc)
             local tracking=S.players[key]
             if not tracking then
-                tracking={alive=false,dead=false,lastPawn=nil,gear={},
+                tracking={alive=false,dead=false,lastPawn=nil,gear={},money=nil,
                     snapshotCycle=0,lastState=nil,lastHealth=nil}
                 S.players[key]=tracking
             end
@@ -430,6 +482,7 @@ local function monitorPlayers(ctx)
             tracking.lastHealth=health
             if activeCharacter then
                 tracking.lastPawn=char
+                tracking.money=snapshotMoney(char) or tracking.money
                 tracking.alive=true
                 tracking.dead=false
                 tracking.snapshotCycle=tracking.snapshotCycle+1
