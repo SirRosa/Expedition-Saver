@@ -89,8 +89,20 @@ local cache={}
 local function first(cls)
     if valid(cache[cls]) then return cache[cls] end
     cache[cls]=nil
+    local function live(obj)
+        if not valid(obj) then return false end
+        local id=path(obj)
+        return id and not id:find("Default__",1,true)
+    end
     local ok,obj=pcall(FindFirstOf,cls)
-    if ok and valid(obj) then cache[cls]=obj;return obj end
+    if ok and live(obj) then cache[cls]=obj;return obj end
+    -- FindFirstOf may return a Class Default Object before an actual actor.
+    local good,items=pcall(FindAllOf,cls)
+    if good and type(items)=="table" then
+        for _,candidate in ipairs(items) do
+            if live(candidate) then cache[cls]=candidate;return candidate end
+        end
+    end
 end
 local function all(cls)
     local ok,objects=pcall(FindAllOf,cls)
@@ -275,6 +287,12 @@ local function captureDeath(char)
     if not valid(pc) then return end
     local key=path(pc)
     if not key or S.pending[key] then return end
+    -- Ignore NPC/AI deaths even if they expose a Controller method.
+    local isPlayer=false
+    for _,playerController in ipairs(all("HeldenPlayerController")) do
+        if path(playerController)==key then isPlayer=true;break end
+    end
+    if not isPlayer then return end
     local inv=gearOf(char)
     local entry={controller=pc,oldChar=char,gear=inv,
         started=os.clock(),attempts=0,nextRequest=0,
@@ -329,7 +347,7 @@ local function processDeaths(ctx)
         else
             local pawn=currentPawn(entry.controller)
             if entry.spawned and valid(entry.spawned) then pawn=entry.spawned end
-            if pawn and pawn~=entry.oldChar and valid(get(pawn,"CharacterStats")) then
+            if pawn and path(pawn)~=path(entry.oldChar) and valid(get(pawn,"CharacterStats")) then
                 local at=respawnLocation()
                 if at and teleport(pawn,at) then
                     local healed=heal(pawn)
@@ -531,8 +549,29 @@ local function heartbeat()
         S.warned=true;log("poll error: "..tostring(err))
     end
 end
-hook("/Game/Animation/ABP_HeldenPlayer.ABP_HeldenPlayer_C:BlueprintUpdateAnimation",
-     function() heartbeat() end)
+-- Persistent game-thread polling is crucial: when the final player dies,
+-- BlueprintUpdateAnimation may stop entirely. UE4SS v3 has LoopAsync and
+-- ExecuteInGameThread; v4 also has a direct game-thread timer.
+local scheduled=false
+if type(LoopInGameThreadWithDelay)=="function" then
+    local ok=pcall(function()
+        LoopInGameThreadWithDelay(450,function() heartbeat() end)
+    end)
+    if ok then scheduled=true;log("game-thread timer active (450 ms)") end
+elseif type(LoopAsync)=="function" and type(ExecuteInGameThread)=="function" then
+    local ok=pcall(function()
+        LoopAsync(450,function()
+            pcall(function() ExecuteInGameThread(function() heartbeat() end) end)
+            return false
+        end)
+    end)
+    if ok then scheduled=true;log("UE4SS v3 async timer -> game-thread queue active") end
+end
+if not scheduled then
+    log("WARNING: no independent timer; animation-hook fallback may stop during party wipe")
+    hook("/Game/Animation/ABP_HeldenPlayer.ABP_HeldenPlayer_C:BlueprintUpdateAnimation",
+         function() heartbeat() end)
+end
 hook("/Script/Engine.PlayerController:ClientRestart",
      function()
          cache={};S.lastPoll=-1;S.sample=CFG.AnimationSample-1
@@ -541,8 +580,16 @@ hook("/Script/Engine.PlayerController:ClientRestart",
 if CFG.EnablePhysicalCoins and RegisterKeyBind and Key and Key[CFG.CoinActionKey] then
     local ok,err=pcall(function()
         RegisterKeyBind(Key[CFG.CoinActionKey],function()
-            local success,why=pcall(convertCoin)
-            if not success then log("F7 coin conversion aborted: "..tostring(why)) end
+            local function task()
+                local success,why=pcall(convertCoin)
+                if not success then log("F7 coin conversion aborted: "..tostring(why)) end
+            end
+            if type(ExecuteInGameThread)=="function" then
+                local scheduled,err=pcall(function() ExecuteInGameThread(task) end)
+                if not scheduled then log("F7 dispatch failed: "..tostring(err)) end
+            else
+                log("F7: ExecuteInGameThread unavailable; no unsafe coin mutation")
+            end
         end)
     end)
     if ok then log("F7 physical Artifact Coin conversion registered (host only)")
