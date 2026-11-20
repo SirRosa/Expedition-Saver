@@ -342,7 +342,7 @@ end
 local function captureDeath(char)
     if not CFG.EnableRespawn or not onHost() then return end
     local ctx=game()
-    if not ctx or not (ctx.phase==2 or (ctx.phase==3 and S.active)) then return end
+    if not ctx or not (ctx.phase==2 or (ctx.phase==3 and (S.active or ctx.failed))) then return end
     local pc
     pcall(function() pc=char:GetController() end)
     if not valid(pc) then return end
@@ -356,7 +356,7 @@ local function captureDeath(char)
     if not isPlayer then return end
     local inv=gearOf(char)
     local entry={controller=pc,oldChar=char,gear=inv,
-        started=os.clock(),attempts=0,nextRequest=0,
+        started=os.clock(),ageTicks=0,attempts=0,nextRequestTick=0,
         spawned=nil,delivered=false}
     S.pending[key]=entry
     S.deathEvents=S.deathEvents+1
@@ -453,10 +453,11 @@ end
 
 local function processDeaths(ctx)
     if not CFG.EnableRespawn then return end
-    local now=os.clock()
     for key,entry in pairs(S.pending) do
-        -- Do not try respawn after the entire expedition has already failed.
-        if now-entry.started>35 then
+        -- LoopAsync/LoopInGameThread use wall time. os.clock() is process CPU
+        -- time on Windows; previously a "35-second" timeout could last minutes.
+        entry.ageTicks=(entry.ageTicks or 0)+1
+        if entry.ageTicks>120 then
             log("respawn timed out for "..key)
             S.pending[key]=nil
         else
@@ -471,10 +472,10 @@ local function processDeaths(ctx)
                     S.pending[key]=nil
                     S.respawned=S.respawned+1
                 end
-            elseif now-entry.started>=CFG.RespawnDelaySeconds and
-                   entry.attempts<CFG.MaxRespawnRequests and now>=entry.nextRequest then
+            elseif entry.attempts<CFG.MaxRespawnRequests and
+                   entry.ageTicks>=(entry.nextRequestTick or 1) then
                 entry.attempts=entry.attempts+1
-                entry.nextRequest=now+CFG.RespawnRetrySeconds
+                entry.nextRequestTick=entry.ageTicks+5
                 local ok,err=pcall(function()
                     entry.controller:RespawnCharacter_Server()
                 end)
@@ -611,7 +612,10 @@ local function spawnMoney(world,position,actorClass,amount,currency)
     local ok,coin=pcall(function()
         return world:SpawnActor(actorClass,position,{Pitch=0,Yaw=0,Roll=0})
     end)
-    if not ok or not valid(coin) then return false end
+    if not ok or not valid(coin) then
+        log("COIN SPAWN FAILED "..currency.." x"..amount.." error="..tostring(coin))
+        return false
+    end
     local money=get(coin,"Money")
     if not money then
         pcall(function() coin:K2_DestroyActor() end)
@@ -627,8 +631,24 @@ local function spawnMoney(world,position,actorClass,amount,currency)
         and number(get(actual,currency=="Gold" and "Artifacts" or "Gold"),
             0,CFG.MaxCoinsPerDrop)==0
     if not success then
-        pcall(function() coin:K2_DestroyActor() end)
-        return false
+        -- Fallback for UScriptStruct wrappers returned as detached copies.
+        pcall(function()
+            coin.Money={
+                Gold=currency=="Gold" and amount or 0,
+                Artifacts=currency=="Artifacts" and amount or 0,
+                Scraps=0
+            }
+        end)
+        local actual2=get(coin,"Money")
+        success=number(get(actual2,currency),0,CFG.MaxCoinsPerDrop)==amount
+            and number(get(actual2,"Scraps"),0,CFG.MaxCoinsPerDrop)==0
+            and number(get(actual2,currency=="Gold" and "Artifacts" or "Gold"),
+                0,CFG.MaxCoinsPerDrop)==0
+        if not success then
+            pcall(function() coin:K2_DestroyActor() end)
+            log("COIN INITIALIZATION FAILED "..currency.." x"..amount)
+            return false
+        end
     end
     return true
 end
@@ -638,10 +658,12 @@ local function processDropQueue()
     if not ds then return end
     local goldClass=get(ds,"GoldCoinActorClass")
     local artifactClass=get(ds,"ArtifactCoinActorClass")
-    local now=os.clock()
     for i=#S.dropQueue,1,-1 do
         local job=S.dropQueue[i]
-        if now-job.queued>=CFG.RewardDelaySeconds then
+        job.attempts=(job.attempts or 0)+1
+        -- This runs on the *next* 300ms engine-thread tick. No CPU-time
+        -- delay: the v0.2 delay used os.clock and could stall drops.
+        if true then
             local done=true
             if job.gold>0 and not job.goldDone then
                 job.goldDone=spawnMoney(job.world,job.at,goldClass,job.gold,"Gold")
@@ -657,7 +679,7 @@ local function processDropQueue()
                     log("DROP artifacts="..job.artifacts.." "..job.key)
                 else done=false end
             end
-            if done or now-job.queued>5 then
+            if done or job.attempts>=10 then
                 if not done then
                     log("WARNING partial/unpaid extraction reward: "..job.key..
                         " goldDone="..tostring(job.goldDone)..
@@ -789,15 +811,27 @@ end
 local function isExpeditionDeath()
     if not onHost() then return false end
     local ctx=game()
-    return ctx and (ctx.phase==2 or (ctx.phase==3 and S.active))
+    return ctx and (ctx.phase==2 or (ctx.phase==3 and (S.active or ctx.failed)))
 end
 local function watchDeath(context)
+    S.rawDeathEvents=S.rawDeathEvents+1
     local character=unwrap(context)
+    if S.rawDeathEvents<=12 then
+        local ctx=game()
+        log("RAW DIE_Auth actor="..tostring(path(character))..
+            " host="..tostring(onHost())..
+            " phase="..tostring(ctx and ctx.phase)..
+            " accepted="..tostring(isExpeditionDeath()))
+    end
     if not valid(character) or not isExpeditionDeath() then return end
     captureDeath(character)
 end
 local function watchControllerKilled(context)
     local pc=unwrap(context)
+    if valid(pc) then
+        log("RAW OnPlayerKilled controller="..tostring(path(pc))..
+            " accepted="..tostring(isExpeditionDeath()))
+    end
     if not valid(pc) or not isExpeditionDeath() then return end
     local old=get(pc,"LastPlayerChar")
     if valid(old) then captureDeath(old) end
@@ -808,7 +842,7 @@ local function immediatelyRequestRespawn(context)
     local entry=S.pending[path(pc)]
     if not entry or entry.attempts>0 then return end
     entry.attempts=1
-    entry.nextRequest=os.clock()+CFG.RespawnRetrySeconds
+    entry.nextRequestTick=(entry.ageTicks or 0)+5
     local ok,err=pcall(function() pc:RespawnCharacter_Server() end)
     log("IMMEDIATE RESPAWN on OnPlayerKilled post -> "..tostring(ok)..
         (ok and "" or ": "..tostring(err)))
@@ -848,6 +882,7 @@ local function safePostBool(cb)
     return function(...)
         local ok,result=pcall(cb,...)
         if ok then return result end
+        log("HOOK return override failed: "..tostring(result))
     end
 end
 local function retryHooks()
