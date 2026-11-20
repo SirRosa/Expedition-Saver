@@ -48,8 +48,10 @@ local function fixture()
         counts.respawn=counts.respawn+1
         self._pawn=newPawn
     end
+    local gearClass=actor({_name="Class /Game/BP_TestSword"})
     local item=actor({_name="HeldenEquipableItem /Game/A",CurrentInventorySlot=0,
         PreviousOwner=corpse,CurrentSlot=actor({_name="ItemSlot"})})
+    function item:GetClass() return gearClass end
     function item:DetachFromAll() self.detached=true end
     function item:K2_TeleportTo(at,rot)
         self.location=at
@@ -85,9 +87,11 @@ local function fixture()
     function newPawn:K2_GetActorLocation() return {X=1000,Y=2000,Z=300} end
     local world=actor({_name="World /Game/World"})
     function loot:GetWorld() return world end
+    function lift:GetWorld() return world end
     function world:SpawnActor(cls,loc,rot)
-        assert(cls==coinClass or cls==goldClass)
-        local coin=actor({Money={Artifacts=0,Gold=0,Scraps=0}})
+        assert(cls==coinClass or cls==goldClass or cls==gearClass)
+        local coin=actor(cls==gearClass and {ItemDurability=0,ItemDataAsset=nil} or
+            {Money={Artifacts=0,Gold=0,Scraps=0}})
         function coin:K2_DestroyActor() self._valid=false end
         spawned[#spawned+1]={coin=coin,loc=loc}
         return coin
@@ -346,6 +350,15 @@ test("permadeath markers cleared during exploration, not only at end screen",fun
     t.md.bHasFailed=true;t.gs.bExpeditionFailed=true
     t.tick(1)
     assert(t.md.bHasFailed==false and t.gs.bExpeditionFailed==false)
+end)
+
+test("destroyed player gear is recreated once at lift after native respawn",function()
+    local t=fixture();t.tick();t.killed()
+    t.item._valid=false
+    t.tick(1.5);t.tick()
+    assert(#t.spawned==1,"must recreate lost item, not only move surviving actors")
+    assert(t.spawned[1].coin.ItemDurability==0)
+    t.tick(2);assert(#t.spawned==1,"must not duplicate lost inventory on next poll")
 end)
 
 print("ALL TESTS PASSED ("..passed..")")
