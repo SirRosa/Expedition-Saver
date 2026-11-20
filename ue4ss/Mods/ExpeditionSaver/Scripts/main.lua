@@ -225,7 +225,8 @@ local S={
     players={},recoveries={},observedDeaths=0,failedBarriers=0,coinsLocated=0,
     unresolvedTreasureLogs=0,
     damageHits={},pollCycle=0,gearScanTick=-1,gearScanObjects={},
-    coinBaseline={},coinBaselineCycle=0,currencyCleanup={},
+    coinBaseline={},coinBaselineCycle=0,coinBaselineReady=false,
+    currencyCleanup={},claimedDeathCoins={},
     failureChecks=0,
     mode=nil
 }
@@ -293,7 +294,8 @@ local function resetForSave(ctx,key,slot)
     S.players=preserve and oldPlayers or {}
     S.recoveries=preserve and oldRecoveries or {}
     S.currencyCleanup=preserve and oldCurrencyCleanup or {}
-    S.coinBaseline={};S.coinBaselineCycle=0
+    S.coinBaseline={};S.coinBaselineCycle=0;S.coinBaselineReady=false
+    S.claimedDeathCoins={}
     S.damageHits={};S.pollCycle=0
     S.gearScanTick=-1;S.gearScanObjects={}
     S.nextBackupDepth=-1
@@ -418,6 +420,7 @@ local function snapshotExistingCoins()
         end
     end
     S.coinBaseline=existing
+    S.coinBaselineReady=true
 end
 
 -- Native death coins can remain in the dungeon after the wallet is restored.
@@ -432,109 +435,144 @@ local function processCurrencyCleanup()
         if not valid(job.pawn) or not job.at then
             S.currencyCleanup[key]=nil
         else
-            local target=job.money
-            local funded=true
+            -- Wallet must be credited *before* a physical coin can be removed.
+            -- A partial native drop (e.g. Gold+Artifacts without Scraps)
+            -- is completely legitimate; requiring an exact 3-field total
+            -- previously left all physical coins on the floor.
             local wallet=snapshotMoney(job.pawn)
+            local funded=wallet~=nil
             for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
-                if not wallet or wallet[currency]<(target[currency] or 0) then
+                if not wallet or wallet[currency]<(job.money[currency] or 0) then
                     funded=false
                 end
             end
             if funded then
-                local seen={}
-                local totals={Gold=0,Artifacts=0,Scraps=0}
-                local ambiguous=false
+                local newCoins=0
                 for _,coin in ipairs(all("HeldenPhysicsCoin")) do
-                    local id=valid(coin) and path(coin) or nil
-                    if id and not job.oldCoins[id] and
-                       not id:find("Default__",1,true) then
-                        local at=location(coin)
-                        if at and distance2(at,job.at)<=
-                           CFG.DeathCoinRadius*CFG.DeathCoinRadius then
-                            local age
-                            pcall(function() age=coin:GetGameTimeSinceCreation() end)
-                            if type(age)=="number" and age>=0 and
-                               age<=CFG.DeathCoinMaxAgeSeconds then
-                                local money=get(coin,"Money")
-                                local values={}
-                                local good=money~=nil
-                                local positive=false
-                                for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
-                                    local n=number(get(money,currency),0,100000000)
-                                    if n==nil then good=false end
-                                    values[currency]=n or 0
-                                    if n and n>0 then positive=true end
-                                end
-                                if good and positive then
+                    if valid(coin) then
+                        local id=path(coin)
+                        if id and not job.oldCoins[id] and
+                           not S.claimedDeathCoins[id] and
+                           not id:find("Default__",1,true) then
+                            local at=location(coin)
+                            if at and distance2(at,job.at)<=
+                               CFG.DeathCoinRadius*CFG.DeathCoinRadius then
+                                local age
+                                pcall(function()
+                                    age=coin:GetGameTimeSinceCreation()
+                                end)
+                                if type(age)=="number" and age>=0 and
+                                   age<=CFG.DeathCoinMaxAgeSeconds then
                                     local world
                                     pcall(function() world=coin:GetWorld() end)
-                                    if not job.world or
-                                       (valid(world) and path(world)==job.world) then
-                                        local fits=true
-                                        for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
-                                            if totals[currency]+values[currency]>
-                                               (target[currency] or 0) then fits=false end
-                                        end
-                                        if fits then
-                                            seen[#seen+1]={actor=coin,id=id}
-                                            for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
-                                                totals[currency]=totals[currency]+values[currency]
+                                    local sameWorld=not job.world or
+                                        (valid(world) and path(world)==job.world)
+                                    -- A coin explicitly owned/instigated by
+                                    -- another player or object is NOT death loot.
+                                    local owner,instigator
+                                    pcall(function() owner=coin:GetOwner() end)
+                                    pcall(function()
+                                        instigator=coin:GetInstigatorController()
+                                    end)
+                                    local ownerId=valid(owner) and path(owner)
+                                    local instId=valid(instigator) and path(instigator)
+                                    local hasForeignOwner=(ownerId and
+                                        ownerId~=job.oldChar and
+                                        ownerId~=job.controller) or
+                                        (instId and instId~=job.controller)
+                                    if sameWorld and not hasForeignOwner then
+                                        local m=get(coin,"Money")
+                                        local amounts={}
+                                        local safe=m~=nil
+                                        local positive=false
+                                        for _,currency in ipairs(
+                                            {"Gold","Artifacts","Scraps"}) do
+                                            local n=number(get(m,currency),0,100000000)
+                                            if n==nil then safe=false end
+                                            amounts[currency]=n or 0
+                                            if n and n>0 then positive=true end
+                                            if n and n>
+                                                (job.money[currency] or 0)-
+                                                (job.removed[currency] or 0) then
+                                                safe=false
                                             end
-                                        else ambiguous=true end
+                                        end
+                                        if safe and positive then
+                                            newCoins=newCoins+1
+                                            -- Clear native Money on the actor
+                                            -- FIRST so a destroy replication
+                                            -- delay cannot create a second
+                                            -- collectible payout.
+                                            local zero=true
+                                            for _,currency in ipairs(
+                                                {"Gold","Artifacts","Scraps"}) do
+                                                if not put(m,currency,0) then
+                                                    zero=false
+                                                end
+                                            end
+                                            local actual=get(coin,"Money")
+                                            for _,currency in ipairs(
+                                                {"Gold","Artifacts","Scraps"}) do
+                                                if number(get(actual,currency),
+                                                    0,100000000)~=0 then
+                                                    zero=false
+                                                end
+                                            end
+                                            if not zero then
+                                                put(coin,"Money",{
+                                                    Gold=0,Artifacts=0,Scraps=0
+                                                })
+                                                actual=get(coin,"Money")
+                                                zero=true
+                                                for _,currency in ipairs(
+                                                    {"Gold","Artifacts","Scraps"}) do
+                                                    if number(get(actual,currency),
+                                                        0,100000000)~=0 then
+                                                        zero=false
+                                                    end
+                                                end
+                                            end
+                                            if zero then
+                                                S.claimedDeathCoins[id]=true
+                                                for _,currency in ipairs(
+                                                    {"Gold","Artifacts","Scraps"}) do
+                                                    job.removed[currency]=
+                                                        job.removed[currency]+
+                                                        amounts[currency]
+                                                end
+                                                local ok=pcall(function()
+                                                    coin:K2_DestroyActor()
+                                                end)
+                                                job.cleared=job.cleared+1
+                                                log("DEATH COINS REMOVED "..id..
+                                                    " Gold="..amounts.Gold..
+                                                    " Artifacts="..amounts.Artifacts..
+                                                    " Scraps="..amounts.Scraps..
+                                                    " destroyed="..tostring(ok))
+                                            else
+                                                job.rejected=job.rejected+1
+                                                log("DEATH COINS: unable to zero "..
+                                                    id.."; not destroyed")
+                                            end
+                                        end
                                     end
                                 end
                             end
                         end
                     end
                 end
-                local exact=#seen>0 and not ambiguous
-                for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
-                    if totals[currency]~=(target[currency] or 0) then exact=false end
-                end
-                if exact then
-                    local cleared=0
-                    for _,match in ipairs(seen) do
-                        local coin=match.actor
-                        local money=get(coin,"Money")
-                        local zero=true
-                        for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
-                            zero=put(money,currency,0) and zero
-                        end
-                        local actual=get(coin,"Money")
-                        for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
-                            if number(get(actual,currency),0,100000000)~=0 then
-                                zero=false
-                            end
-                        end
-                        if not zero then
-                            -- Some UE4SS UStruct wrappers are returned as copies.
-                            -- Exactly the same verified writeback fallback is
-                            -- required by spawnMoney() in this mod.
-                            put(coin,"Money",{Gold=0,Artifacts=0,Scraps=0})
-                            local reread=get(coin,"Money")
-                            zero=true
-                            for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
-                                if number(get(reread,currency),0,100000000)~=0 then
-                                    zero=false
-                                end
-                            end
-                        end
-                        if zero then
-                            local ok=pcall(function() coin:K2_DestroyActor() end)
-                            if ok then cleared=cleared+1
-                            else log("DEATH COINS zeroed, destroy failed "..match.id) end
-                        else
-                            log("DEATH COINS WARNING: cannot zero coin "..match.id)
-                        end
-                    end
-                    log("DEATH COINS matched="..#seen.." cleared="..cleared..
-                        " Gold="..totals.Gold.." Artifacts="..totals.Artifacts..
-                        " Scraps="..totals.Scraps.." itemsUntouched=true")
-                    S.currencyCleanup[key]=nil
-                end
             end
-            if S.currencyCleanup[key] and job.ticks>=CFG.DeathCoinScanTicks then
-                log("DEATH COINS UNRESOLVED: no certain full drop match; no coins destroyed")
+            local full=job.removed.Gold==job.money.Gold and
+                job.removed.Artifacts==job.money.Artifacts and
+                job.removed.Scraps==job.money.Scraps
+            if full or job.ticks>=CFG.DeathCoinScanTicks then
+                log("DEATH COINS RESULT removed="..job.cleared..
+                    " Gold="..job.removed.Gold..
+                    " Artifacts="..job.removed.Artifacts..
+                    " Scraps="..job.removed.Scraps..
+                    " nativeDropMayBePartial="..tostring(not full)..
+                    " errors="..job.rejected..
+                    " itemsUntouched=true")
                 S.currencyCleanup[key]=nil
             end
         end
@@ -622,6 +660,7 @@ local function queuePlayerDeath(pc,char,snapshot,reason)
     S.pending[key]={controller=pc,oldChar=char,gear=inv,money=cash,
         started=os.clock(),ageTicks=0,attempts=0,nextRequestTick=0,
         deathPos=deathPos,deathWorld=worldName,oldCoins=oldCoins,
+        baselineReady=S.coinBaselineReady,
         mode=ctx.mode,spawned=nil,delivered=false}
     S.deathEvents=S.deathEvents+1
     log("PLAYER DEATH queued from "..tostring(reason).." controller="..key..
@@ -709,7 +748,8 @@ local function monitorPlayers(ctx)
     -- One registry scan at most every 4 poll cycles, regardless of player count.
     if anyAlive then
         S.coinBaselineCycle=S.coinBaselineCycle+1
-        if S.coinBaselineCycle>=CFG.CoinBaselineEveryPolls then
+        if not S.coinBaselineReady or
+           S.coinBaselineCycle>=CFG.CoinBaselineEveryPolls then
             S.coinBaselineCycle=0
             snapshotExistingCoins()
         end
@@ -788,12 +828,14 @@ local function collectAtElevator(entry,dest,pawn)
     end
     recoverMoney(pawn,entry)
     if CFG.CleanupNativeDeathCoins and CFG.EnableMoneyRecovery and
-       entry.money and entry.deathPos and
+       entry.baselineReady and entry.money and entry.deathPos and
        ((entry.money.Gold or 0)>0 or (entry.money.Artifacts or 0)>0 or
         (entry.money.Scraps or 0)>0) then
         S.currencyCleanup[key]={
             pawn=pawn,money=entry.money,at=entry.deathPos,
-            oldCoins=entry.oldCoins or {},world=entry.deathWorld,ticks=0
+            oldCoins=entry.oldCoins or {},world=entry.deathWorld,ticks=0,
+            controller=key,oldChar=path(entry.oldChar),removed={Gold=0,Artifacts=0,Scraps=0},
+            cleared=0,rejected=0
         }
         log("DEATH COINS tracking death location "..
             string.format("%.0f/%.0f/%.0f",entry.deathPos.X,
