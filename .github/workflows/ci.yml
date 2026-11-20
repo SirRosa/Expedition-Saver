@@ -67,9 +67,9 @@ jobs:
         shell: pwsh
         run: |
           $source=Get-Content ue4ss/Mods/ExpeditionSaver/Scripts/main.lua -Raw
-          if ($source -match 'os\\.execute\\s*\\(') { throw 'Audio must never use os.execute' }
-          if ($source -match 'respawn_audio\\.exe') { throw 'Old EXE references remain' }
-          if ($source -notmatch 'package\\.loadlib') { throw 'Missing native DLL loader' }
+          if ($source.Contains('os.execute(')) { throw 'Audio must never use os.execute' }
+          if ($source.Contains('respawn_audio.exe')) { throw 'Old EXE references remain' }
+          if (-not $source.Contains('package.loadlib')) { throw 'Missing native DLL loader' }
           $dll=Get-Item respawn_audio.dll
           if ($dll.Length -lt 4096 -or $dll.Length -gt 500000) { throw 'Invalid DLL size' }
           Write-Host ("PASS: in-process audio DLL = {0} bytes" -f $dll.Length)
