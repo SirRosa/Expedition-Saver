@@ -8,6 +8,8 @@ local CFG = {
     MaxDepth = 10000,
     EnableRespawn = true,
     EnableItemRecovery = true,
+    RestoreDestroyedItems = true,
+    MaxGearPerPlayer = 60,
     EnableNoPermadeath = true,
     EnablePhysicalCoins = true,
     RespawnDelaySeconds = 1.25,
@@ -209,10 +211,13 @@ local function backupDepth(ctx,depth)
     S.nextBackupDepth=depth
 end
 local function resetForSave(ctx,key,slot)
+    local oldSlot=S.slot
+    local oldPending=S.pending
+    local preserve=oldSlot==slot and S.recoveryRequired
     S.slot=slot;S.saveKey=key
     S.depth=number(get(ctx.save,"DungeonLevel"),0,CFG.MaxDepth) or 0
     S.highestSeed=0;S.offset=nil;S.active=false;S.failed=false
-    S.phase=nil;S.pending={};S.coinLedger={}
+    S.phase=nil;S.pending=preserve and oldPending or {};S.coinLedger={}
     S.nextBackupDepth=-1
     S.dropQueue={};S.destructionSeen={}
     S.nextMachineRepair=0;S.machineRepairAttempts=0
@@ -286,7 +291,16 @@ local function gearOf(char)
         local id=path(item)
         if not id or seen[id] then return end
         seen[id]=true
-        result[#result+1]={ref=item,key=id,slotIdx=number(get(item,"CurrentInventorySlot"),0,128)}
+        if #result>=CFG.MaxGearPerPlayer then return end
+        local cls
+        pcall(function() cls=item:GetClass() end)
+        local asset=get(item,"ItemDataAsset")
+        result[#result+1]={ref=item,key=id,klass=cls,
+            classPath=valid(cls) and path(cls) or nil,
+            asset=asset,assetPath=valid(asset) and path(asset) or nil,
+            durability=tonumber(get(item,"ItemDurability")),
+            enchant=get(item,"ItemEnchantment"),
+            slotIdx=number(get(item,"CurrentInventorySlot"),0,128)}
     end
     each(get(char,"EquipedItems"),add)
     for _,item in ipairs(all("HeldenEquipableItem")) do
@@ -342,32 +356,74 @@ local function heal(pawn)
 end
 local function collectAtElevator(entry,dest,pawn)
     if not CFG.EnableItemRecovery then return end
-    local moved,alreadyOwned,lost=0,0,0
-    local equipped={}
-    each(get(pawn,"EquipedItems"),function(item)
-        if valid(item) then equipped[path(item)]=true end
+    local moved,alreadyOwned,created,lost=0,0,0,0
+    local counts={}
+    local function countNative(item)
+        if not valid(item) then return end
+        local klass
+        pcall(function() klass=item:GetClass() end)
+        local key=valid(klass) and path(klass)
+        if key then counts[key]=(counts[key] or 0)+1 end
+    end
+    each(get(pawn,"EquipedItems"),countNative)
+    each(get(pawn,"ItemSlots"),function(slot)
+        local item=get(slot,"CurrentItemInSlot")
+        if valid(item) then countNative(item) end
     end)
+    local world
+    pcall(function() world=pawn:GetWorld() end)
+    if not valid(world) then
+        local lift=first("HeldenDungeonElevator")
+        pcall(function() world=lift:GetWorld() end)
+    end
     for i,r in ipairs(entry.gear) do
         local item=r.ref
-        if valid(item) then
-            if equipped[path(item)] or get(item,"PreviousOwner")==pawn then
-                -- If the native respawn already re-equipped it, NEVER detach
-                -- that item. Preserve the game's correct replicated state.
-                alreadyOwned=alreadyOwned+1
-            else
-                local at={X=dest.X+((i-1)%4)*55-75,Y=dest.Y+math.floor((i-1)/4)*55,Z=dest.Z+40}
-                -- Only reposition surviving actor instances; never spawn copies.
-                pcall(function() item:DetachFromAll() end)
-                local ok=teleport(item,at)
-                if ok then moved=moved+1 else lost=lost+1 end
-            end
+        local key=r.classPath
+        local count=key and (counts[key] or 0) or 0
+        if count>0 then
+            counts[key]=count-1
+            -- Native game already restored an item of this class.
+            alreadyOwned=alreadyOwned+1
         else
-            lost=lost+1
+            local at={X=dest.X+((i-1)%4)*55-75,
+                Y=dest.Y+math.floor((i-1)/4)*55,Z=dest.Z+40}
+            if valid(item) then
+                pcall(function() item:DetachFromAll() end)
+                if teleport(item,at) then moved=moved+1 else lost=lost+1 end
+            elseif CFG.RestoreDestroyedItems and valid(world) then
+                local klass=r.klass
+                if not valid(klass) and r.classPath and
+                    type(StaticFindObject)=="function" then
+                    pcall(function() klass=StaticFindObject(r.classPath) end)
+                end
+                if valid(klass) then
+                    local ok,newItem=pcall(function()
+                        return world:SpawnActor(klass,at,{Pitch=0,Yaw=0,Roll=0})
+                    end)
+                    if ok and valid(newItem) then
+                        if r.asset and valid(r.asset) then
+                            put(newItem,"ItemDataAsset",r.asset)
+                        end
+                        if r.durability then
+                            put(newItem,"ItemDurability",r.durability)
+                        end
+                        if r.enchant~=nil then
+                            pcall(function() newItem.ItemEnchantment=r.enchant end)
+                        end
+                        created=created+1
+                        diag("recreated destroyed gear "..r.key)
+                    else lost=lost+1 end
+                else lost=lost+1 end
+            else lost=lost+1 end
         end
     end
-    log("equipment: "..alreadyOwned.." native re-equipped, "..moved..
-        " moved to lift, "..lost.." lost/unavailable")
+    log("EQUIPMENT native="..alreadyOwned.." moved="..moved..
+        " recreated="..created.." unavailable="..lost)
+    if lost>0 then
+        log("WARNING: "..lost.." items could not be recovered; see complete UE4SS.log")
+    end
 end
+
 local function processDeaths(ctx)
     if not CFG.EnableRespawn then return end
     local now=os.clock()
