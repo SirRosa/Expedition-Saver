@@ -13,6 +13,7 @@ local env=setmetatable({
     DumpUSMAP=function() calls.maps=calls.maps+1 end,
     DumpAllObjects=function() calls.objects=calls.objects+1 end,
 },{__index=_G})
+env._G=env
 assert(loadfile(code,"t",env))()
 assert(type(callbacks[119])=="function")
 assert(type(callbacks[120])=="function")
@@ -33,6 +34,7 @@ local env2=setmetatable({
     DumpUSMAP=function() failed=true;error("unavailable data") end,
     DumpAllObjects=function() end,
 },{__index=_G})
+env2._G=env2
 local binds={}
 env2.RegisterKeyBind=function(key,fn) binds[key]=fn end
 assert(loadfile(code,"t",env2))()
