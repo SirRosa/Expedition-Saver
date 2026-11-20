@@ -1132,7 +1132,7 @@ local function processInventoryRecoveries()
 end
 
 -- Audio is deliberately outside Unreal's game thread and does not use
--- UObject/USoundBase APIs: the attached MPEG has been converted to WAV.
+-- UObject/USoundBase APIs. Install the user's NEW 44.1kHz PCM WAV unchanged.
 -- UE4SS does not natively import arbitrary audio as a cooked USoundBase.
 -- Tiny, source-auditable helper: Audio/respawn_audio.exe (WinMM PlaySoundW).
 -- Both files must be installed. Missing files fail open without affecting
@@ -1165,8 +1165,9 @@ local function audioFolder()
 end
 local function playRespawnSound(pc)
     if not CFG.EnableRespawnSound then return end
-    -- Audio is local, not network-replicated. Remote players' respawn
-    -- is silent on the host; they need the same mod on their own PC.
+    -- Every game instance plays only for its own locally controlled player.
+    -- A client installation detects client respawns independently of host
+    -- authority and never plays the host's or another client's events.
     if valid(pc) then
         local ok,isLocal=pcall(function() return pc:IsLocalController() end)
         if ok and isLocal==false then return end
@@ -1199,6 +1200,106 @@ local function playRespawnSound(pc)
         end)
     end)
     if not ok then log("RESPAWN SOUND async dispatch failed: "..tostring(err)) end
+end
+
+-- Local client-side witness for the death -> successful respawn transition.
+-- This is ONLY audio: it neither respawns nor heals, moves or rewrites items.
+-- The host continues to use its confirmed processDeaths() completion path.
+-- Clients have no HeldenGameMode, so the host-only death queue cannot drive
+-- their sound. The client must observe its own character's state instead.
+local clientAudio={
+    controllerId=nil,seenAlive=false,armed=false,
+    pendingPawn=nil,missingControllerTicks=0,
+}
+local function localAudioController()
+    local function choose(list)
+        for _,pc in ipairs(list) do
+            if valid(pc) then
+                local ok,isLocal=pcall(function() return pc:IsLocalController() end)
+                if ok and isLocal==true then return pc end
+            end
+        end
+    end
+    local pc=choose(playerControllers())
+    -- Initial client join may have cached an empty controller list before
+    -- network replication completed. Retry at most once every 3s.
+    if not pc and S.pollCycle%10==0 then
+        pc=choose(playerControllers(true))
+    end
+    return pc
+end
+local function markClientAudioDeath(pc)
+    if not CFG.EnableRespawnSound or not valid(pc) then return end
+    local ok,isLocal=pcall(function() return pc:IsLocalController() end)
+    if not ok or isLocal~=true then return end
+    local id=path(pc)
+    if clientAudio.controllerId==id and clientAudio.seenAlive then
+        clientAudio.armed=true
+    end
+end
+local function observeClientRespawnAudio()
+    if not CFG.EnableRespawnSound then return end
+    local pc=localAudioController()
+    if not valid(pc) then
+        clientAudio.missingControllerTicks=clientAudio.missingControllerTicks+1
+        if clientAudio.missingControllerTicks>100 then
+            clientAudio.controllerId=nil
+            clientAudio.seenAlive=false
+            clientAudio.armed=false
+            clientAudio.pendingPawn=nil
+        end
+        return
+    end
+    clientAudio.missingControllerTicks=0
+    local pcId=path(pc)
+    if clientAudio.controllerId~=pcId then
+        -- New joining controller: first spawn is never a respawn.
+        clientAudio.controllerId=pcId
+        clientAudio.seenAlive=false
+        clientAudio.armed=false
+        clientAudio.pendingPawn=nil
+    end
+
+    local pawn=currentPawn(pc)
+    local soul=resolveWeak(unwrap(get(pc,"SoulCharacter")))
+    local isSoul=valid(pawn) and valid(soul) and path(pawn)==path(soul)
+    local last=resolveWeak(unwrap(get(pc,"LastPlayerChar")))
+    local function character(o)
+        return valid(o) and valid(get(o,"CharacterStats"))
+    end
+
+    local char=nil
+    if character(pawn) and not isSoul then
+        char=pawn
+    elseif clientAudio.armed and character(clientAudio.pendingPawn) then
+        -- OnNewPawn can arrive before LastPlayerChar/GetPawn replicates.
+        char=clientAudio.pendingPawn
+    elseif character(last) then
+        char=last
+    elseif character(pawn) then
+        char=pawn
+    end
+
+    local stats=char and get(char,"CharacterStats")
+    local hp=tonumber(get(stats,"CurrentHealth"))
+    local state=enum(get(char,"CharacterState"))
+    local isDead=isSoul or state==1 or (hp and hp<=0)
+    local isAlive=character(char) and not isDead and hp and hp>0
+
+    if isDead then
+        -- Require a witnessed healthy player beforehand. This prevents
+        -- first join, loading a save, and joining as a spectator from
+        -- triggering audio when a pawn first materializes.
+        if clientAudio.seenAlive then clientAudio.armed=true end
+    elseif isAlive then
+        if clientAudio.armed then
+            clientAudio.armed=false
+            clientAudio.pendingPawn=nil
+            playRespawnSound(pc)
+            log("RESPAWN SOUND client verified dead->alive "..tostring(pcId))
+        end
+        clientAudio.seenAlive=true
+    end
 end
 
 local function reviveOldPawn(entry)
@@ -1987,6 +2088,9 @@ local function poll()
     end
     local now=os.clock()
     local host=onHost()
+    -- Client scripts must observe their own respawns even though they do not
+    -- have the authoritative GameMode required by the gameplay features.
+    if not host then observeClientRespawnAudio() end
     local ctx=host and game()
     S.heartbeatTicks=S.heartbeatTicks+1
     if S.heartbeatTicks>=120 then
@@ -2071,6 +2175,7 @@ local function watchDeath(context)
 end
 local function watchControllerKilled(context)
     local pc=unwrap(context)
+    if not onHost() then markClientAudioDeath(pc) end
     if valid(pc) then
         log("RAW OnPlayerKilled controller="..tostring(path(pc))..
             " accepted="..tostring(isPlayableDeath()))
@@ -2113,6 +2218,13 @@ local function watchNewPawn(context,oldPawn,newPawn)
     local pc=unwrap(context)
     local pawn=unwrap(newPawn)
     if not valid(pc) or not valid(pawn) then return end
+    if not onHost() and clientAudio.armed and
+       clientAudio.controllerId==path(pc) then
+        local ok,isLocal=pcall(function() return pc:IsLocalController() end)
+        if ok and isLocal==true then
+            clientAudio.pendingPawn=pawn
+        end
+    end
     S.newPawnEvents=S.newPawnEvents+1
     local entry=S.pending[path(pc)]
     if entry then entry.spawned=pawn;log("NEWPAWN event for pending death") end
@@ -2337,4 +2449,4 @@ hook("/Script/Engine.PlayerController:ClientRestart",
          S.coinLedger={}
          S.dropQueue={};S.destructionSeen={}
      end)
-log("v0.7.5 LIVE-LOG FIX + optional local respawn WAV (async WinMM)")
+log("v0.7.6 LIVE-LOG FIX + host and client self-respawn WAV (async WinMM)")
