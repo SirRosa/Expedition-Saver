@@ -235,7 +235,7 @@ test("F7 not enabled outside active Expedition",function()
 end)
 test("client-only mode never changes save or coins",function()
     local t=fixture();t.tick()
-    t.registry.GameModeBase=nil
+    t.gm._valid=false;t.registry.GameModeBase=nil
     t.run.State=3;t.run.Flags=1
     t.md.bHasFailed=true;t.gs.bExpeditionFailed=true
     t.tick()
