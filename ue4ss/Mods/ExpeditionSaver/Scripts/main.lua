@@ -474,6 +474,19 @@ local function processCurrencyCleanup()
                                 zero=false
                             end
                         end
+                        if not zero then
+                            -- Some UE4SS UStruct wrappers are returned as copies.
+                            -- Exactly the same verified writeback fallback is
+                            -- required by spawnMoney() in this mod.
+                            put(coin,"Money",{Gold=0,Artifacts=0,Scraps=0})
+                            local reread=get(coin,"Money")
+                            zero=true
+                            for _,currency in ipairs({"Gold","Artifacts","Scraps"}) do
+                                if number(get(reread,currency),0,100000000)~=0 then
+                                    zero=false
+                                end
+                            end
+                        end
                         if zero then
                             local ok=pcall(function() coin:K2_DestroyActor() end)
                             if ok then cleared=cleared+1
