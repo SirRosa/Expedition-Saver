@@ -210,6 +210,7 @@ local function resetForSave(ctx,key,slot)
     S.highestSeed=0;S.offset=nil;S.active=false;S.failed=false
     S.phase=nil;S.pending={};S.coinLedger={}
     S.nextBackupDepth=-1
+    S.dropQueue={};S.destructionSeen={}
     local time=number(get(ctx.save,"TimePlayed"),0,1000000000)
     local fails=number(get(ctx.save,"DungeonFails"),0,1000000000)
     local recovered=readBackup(slot,time,fails)
@@ -593,6 +594,7 @@ local function poll()
     if S.slot~=slot or S.saveKey~=key then resetForSave(ctx,key,slot) end
     keepExpedition(ctx)
     processDeaths(ctx)
+    processDropQueue()
     if ctx.phase==1 or ctx.phase==2 then
         if S.phase==0 or S.phase==3 then
             cache["HeldenDungeonElevator"]=nil
@@ -629,10 +631,31 @@ local function watchNewPawn(context,oldPawn,newPawn)
     if entry then entry.spawned=pawn;log("NEWPAWN event for pending death") end
 end
 local registered={}
+local retries={}
 local function hook(f,pre,post)
     if registered[f] then return end
-    local ok,err=pcall(function() RegisterHook(f,pre,post) end)
-    if ok then registered[f]=true else log("hook unavailable "..f..": "..tostring(err)) end
+    local now=os.clock()
+    if retries[f] and now<retries[f] then return end
+    retries[f]=now+CFG.RetryHookSeconds
+    local ok,a,b=pcall(function() return RegisterHook(f,pre,post) end)
+    if ok and a~=nil then
+        registered[f]=true
+        log("HOOK ACTIVE "..f)
+    else
+        log("HOOK NOT READY "..f.." (will retry): "..tostring(a))
+    end
+end
+local function safePre(label,cb)
+    return function(...)
+        local ok,err=pcall(cb,...)
+        if not ok then log("HOOK "..label.." callback failed: "..tostring(err)) end
+    end
+end
+local function safePostBool(cb)
+    return function(...)
+        local ok,result=pcall(cb,...)
+        if ok then return result end
+    end
 end
 -- Native hooks run on the engine thread; no worker threads modify UObjects.
 hook("/Script/Helden.HeldenCharacter:Die_Auth",watchDeath)
@@ -653,6 +676,12 @@ if CFG.EnableNoPermadeath then
             end
         end)
 end
+-- Capture the destruction signal from the engine, not keyboard actions.
+-- Health==0 handles direct damage. Multicast catches non-health-based breakage.
+hook("/Script/Helden.HeldenPhysicsActor:OnHealthModifed",
+     safePre("health",function(context) destructionEvent(context,"health") end))
+hook("/Script/Helden.HeldenPhysicsActor:PlayDestructionEffect_Mulitcast",
+     safePre("destruction",function(context) destructionEvent(context,"effect") end))
 local function safePoll()
     local now=os.clock()
     if S.lastPoll>=0 and now>=S.lastPoll and now-S.lastPoll<CFG.PollSeconds then return end
@@ -695,23 +724,6 @@ hook("/Script/Engine.PlayerController:ClientRestart",
      function()
          cache={};S.lastPoll=-1;S.sample=CFG.AnimationSample-1
          S.coinLedger={}
+         S.dropQueue={};S.destructionSeen={}
      end)
-if CFG.EnablePhysicalCoins and RegisterKeyBind and Key and Key[CFG.CoinActionKey] then
-    local ok,err=pcall(function()
-        RegisterKeyBind(Key[CFG.CoinActionKey],function()
-            local function task()
-                local success,why=pcall(convertCoin)
-                if not success then log("F7 coin conversion aborted: "..tostring(why)) end
-            end
-            if type(ExecuteInGameThread)=="function" then
-                local scheduled,err=pcall(function() ExecuteInGameThread(task) end)
-                if not scheduled then log("F7 dispatch failed: "..tostring(err)) end
-            else
-                log("F7: ExecuteInGameThread unavailable; no unsafe coin mutation")
-            end
-        end)
-    end)
-    if ok then log("F7 physical Artifact Coin conversion registered (host only)")
-    else log("F7 key binding failed: "..tostring(err)) end
-end
-log("v0.1.0-alpha loaded: Expedition-only respawn, recovery, depth and physical coins")
+log("v0.2.0-alpha loaded: automatic physical extraction drops; Expedition recovery diagnostics")
