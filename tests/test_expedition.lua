@@ -206,11 +206,11 @@ test("existing equipped item moves to elevator, never spawns duplicated item",fu
     assert(#t.spawned==0)
     assert(t.item.location.Z==420)
 end)
-test("no respawn after whole expedition has ended",function()
+test("respawn request still happens when the game prematurely ends the expedition",function()
     local t=fixture();t.tick();t.killed()
     t.run.State=3;t.run.Flags=1
     t.tick(2)
-    assert(t.counts.respawn==0)
+    assert(t.counts.respawn==1,"post-wipe recovery should not silently cancel death")
 end)
 test("AI character death is ignored",function()
     local t=fixture();t.tick()
