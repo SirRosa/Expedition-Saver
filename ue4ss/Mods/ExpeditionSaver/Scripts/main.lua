@@ -247,6 +247,10 @@ local S={
     failureChecks=0,storyLootDiagnosticCount=0,rewardOwnerDiagnosticCount=0,
     mode=nil
 }
+-- Forward reference: client OnRep_CharacterState can mark death even if
+-- it begins and ends between two 300ms periodic checks.
+local markClientAudioDeath
+
 local function deathAllowed(ctx)
     return ctx~=nil and
         (ctx.isStory or (ctx.isExpedition and
@@ -1170,7 +1174,7 @@ local function playRespawnSound(pc)
     -- authority and never plays the host's or another client's events.
     if valid(pc) then
         local ok,isLocal=pcall(function() return pc:IsLocalController() end)
-        if ok and isLocal==false then return end
+        if not ok or isLocal~=true then return end
     end
     if type(ExecuteAsync)~="function" or type(os.execute)~="function" then
         if not respawnAudioMissingLogged then
@@ -1228,7 +1232,7 @@ local function localAudioController()
     end
     return pc
 end
-local function markClientAudioDeath(pc)
+markClientAudioDeath=function(pc)
     if not CFG.EnableRespawnSound or not valid(pc) then return end
     local ok,isLocal=pcall(function() return pc:IsLocalController() end)
     if not ok or isLocal~=true then return end
@@ -2210,6 +2214,23 @@ end
 local function watchReplicatedDeadState(context)
     local character=unwrap(context)
     if not valid(character) or enum(get(character,"CharacterState"))~=1 then return end
+    if not onHost() then
+        -- Replicated Dead may be brief; arm the local listener before
+        -- possession/LastPlayerChar replication changes references.
+        for _,pc in ipairs(playerControllers()) do
+            if valid(pc) then
+                local pawn=currentPawn(pc)
+                local last=resolveWeak(unwrap(get(pc,"LastPlayerChar")))
+                local characterId=path(character)
+                if characterId and (characterId==path(pawn) or
+                    characterId==path(last)) then
+                    markClientAudioDeath(pc)
+                    break
+                end
+            end
+        end
+        return
+    end
     for _,pc in ipairs(playerControllers()) do
         if valid(pc) then
             local key=path(pc)
