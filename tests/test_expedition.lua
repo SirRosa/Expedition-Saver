@@ -1139,6 +1139,9 @@ test("Story destroy collision multicast pays only dead furniture",function()
     t.registry.HeldenDataSingleton=nil
     t.loot.RandomMoneySpawn={Type=1,Amount=8}
     t.loot.MoneySpawnChance=1
+    function t.loot:GetInspectData()
+        return {bIsInDungeon=false,Value={Gold=0,Artifacts=0,Scraps=0}}
+    end
     t.tick(0)
     local h=t.hooks["/Script/Helden.HeldenConstructActor:DisableCollision_Multicast"]
     assert(h and h.pre)
