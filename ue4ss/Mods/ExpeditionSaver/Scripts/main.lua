@@ -384,7 +384,7 @@ local function gearOf(char)
             asset=asset,assetPath=valid(asset) and path(asset) or nil,
             durability=tonumber(get(item,"ItemDurability")),
             enchant=get(item,"ItemEnchantment"),
-            slotIdx=slotIndex or number(get(item,"CurrentInventorySlot"),0,128),
+            slotIdx=number(get(item,"CurrentInventorySlot"),0,128) or slotIndex,
             source=source}
     end
     -- The game stores inventory items in BOTH EquipedItems and ItemSlots.
@@ -400,6 +400,9 @@ local function gearOf(char)
             add(item,"PreviousOwner")
         end
     end
+    table.sort(result,function(a,b)
+        return (a.slotIdx or 999)<(b.slotIdx or 999)
+    end)
     return result
 end
 local function currentPawn(pc)
@@ -574,6 +577,18 @@ local function isOriginalItemAlreadyPresent(pawn,rec)
                 asName(get(item,"DynamicSaveName"))==dynamic then return true end
         end
     end
+    if rec.slotIdx~=nil and rec.classPath then
+        -- If the native engine rebuilt the same slot with the same class,
+        -- prefer that actor rather than creating a second instance.
+        local items=get(pawn,"ItemSlots")
+        local native
+        pcall(function() native=get(items[rec.slotIdx+1],"CurrentItemInSlot") end)
+        if valid(native) then
+            local cls
+            pcall(function() cls=native:GetClass() end)
+            if path(cls)==rec.classPath then return true end
+        end
+    end
     return false
 end
 local function processInventoryRecoveries()
@@ -587,30 +602,13 @@ local function processInventoryRecoveries()
         else
             local total=#job.entry.gear
             local retained=0
-            -- First consume native equivalents per class, counting each at
-            -- most once; never deduplicate two different instances blindly.
-            local _,remainingClass=snapshotNativeGear(pawn)
+            -- Identity and native slot checks precede any spawns. A
+            -- generic class-count match is unsafe: two swords of the same
+            -- class are not one sword.
             for _,rec in ipairs(job.entry.gear) do
-                if ownsItem(pawn,rec.ref) then
-                    local cls=rec.classPath
-                    if cls and remainingClass[cls] and remainingClass[cls]>0 then
-                        remainingClass[cls]=remainingClass[cls]-1
-                    end
+                if ownsItem(pawn,rec.ref) or
+                   isOriginalItemAlreadyPresent(pawn,rec) then
                     job.done[rec.key]=true
-                end
-            end
-            for _,rec in ipairs(job.entry.gear) do
-                if not job.done[rec.key] then
-                    if isOriginalItemAlreadyPresent(pawn,rec) then
-                        job.done[rec.key]=true
-                        local cls=rec.classPath
-                        if cls and remainingClass[cls] and remainingClass[cls]>0 then
-                            remainingClass[cls]=remainingClass[cls]-1
-                        end
-                    elseif rec.classPath and (remainingClass[rec.classPath] or 0)>0 then
-                        remainingClass[rec.classPath]=remainingClass[rec.classPath]-1
-                        job.done[rec.key]=true
-                    end
                 end
             end
             local unowned=0
