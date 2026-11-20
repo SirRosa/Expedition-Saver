@@ -196,7 +196,8 @@ local S={
     nextMachineRepair=0,machineRepairAttempts=0,
     dropQueue={},destructionSeen={},dropAttempt=0,
     deathEvents=0,newPawnEvents=0,rewardEvents=0,rawDeathEvents=0,rawDestroyEvents=0,heartbeatTicks=1000,machineRepairCycle=1000,
-    players={},observedDeaths=0,failedBarriers=0,coinsLocated=0
+    players={},observedDeaths=0,failedBarriers=0,coinsLocated=0,
+    failureChecks=0
 }
 local function backupFile(slot)
     if not CFG.BackupFile then return nil end
@@ -1031,7 +1032,10 @@ local function poll()
             " recovery="..tostring(S.recoveryRequired)..
             " deaths="..S.deathEvents.." rawDeaths="..S.rawDeathEvents..
             " destructionEvents="..S.rewardEvents..
-            " rawDestructions="..S.rawDestroyEvents)
+            " rawDestructions="..S.rawDestroyEvents..
+            " playerControllers="..#all("HeldenPlayerController")..
+            " failureDoors="..#all("BP_ExpeditionFailed_Actor_C")..
+            " failureChecks="..S.failureChecks)
     end
     if not ctx then
         if S.lastMode~="nonexpedition" then
@@ -1163,8 +1167,13 @@ if CFG.EnableNoPermadeath then
     hook("/Script/Helden.HeldenGameState:HasFailedExpedition",
         function() end,
         safePostBool(function(context)
+            S.failureChecks=S.failureChecks+1
             local gs=unwrap(context)
             local ctx=onHost() and game()
+            if S.failureChecks<=5 then
+                log("HAS FAILED check event host="..tostring(onHost())..
+                    " ctx="..tostring(ctx and ctx.phase))
+            end
             if valid(gs) and ctx and path(ctx.gs)==path(gs) then
                 return false
             end
