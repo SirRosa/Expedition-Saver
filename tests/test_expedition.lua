@@ -498,4 +498,40 @@ test("nil game mode is safely stringified in diagnostic heartbeat",function()
     for _,line in ipairs(t.logs) do assert(not line:find("poll error",1,true)) end
 end)
 
+test("after native respawn RPC is ignored, revive original pawn instead of soul",function()
+    local t=fixture()
+    t.corpse.CharacterState=0;t.corpse.CharacterStats.CurrentHealth=120
+    function t.corpse:K2_TeleportTo(at) self.location=at;return true end
+    function t.pc:Possess(pawn) self._pawn=pawn end
+    function t.pc:ClientRestart(pawn) self._clientRestarted=true end
+    function t.corpse:OnRep_CharacterState() self.replicatedState=true end
+    t.tick(0)
+    t.corpse.CharacterState=1;t.corpse.CharacterStats.CurrentHealth=0
+    t.pc.RespawnCharacter_Server=function(self)
+        t.counts.respawn=t.counts.respawn+1
+        -- Simulates server rejecting native respawn in Expedition EndScreen
+    end
+    for i=1,18 do t.tick(0) end
+    assert(t.counts.respawn==3,"must try native respawn first")
+    assert(t.pc:GetPawn()==t.corpse,"must possess original pawn after failed RPCs")
+    assert(t.corpse.CharacterState==0 and t.corpse.CharacterStats.CurrentHealth==120)
+    assert(t.corpse.location.Z==380 and t.pc._clientRestarted)
+end)
+test("possessed soul is never mistaken for a successfully respawned player",function()
+    local t=fixture()
+    t.corpse.CharacterState=0;t.corpse.CharacterStats.CurrentHealth=120
+    t.tick(0)
+    t.corpse.CharacterState=1;t.corpse.CharacterStats.CurrentHealth=0
+    local soul=actor({_name="HeldenSoul /Game/Soul",CharacterStats=
+        actor({CurrentHealth=5,TotalStats={MaxHealth=10}})})
+    t.pc.SoulCharacter=soul
+    t.pc._pawn=soul
+    t.pc.RespawnCharacter_Server=function(self)
+        t.counts.respawn=t.counts.respawn+1
+    end
+    t.tick(0)
+    assert(t.counts.respawn==1,"soul should not count as native respawn")
+    assert(not soul.location,"soul must not be teleported to lift as player")
+end)
+
 print("ALL TESTS PASSED ("..passed..")")
