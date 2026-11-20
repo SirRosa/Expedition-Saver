@@ -250,4 +250,19 @@ test("a timer is independent of animation callback after all players die",functi
     t.tick()
     assert(t.md.bHasFailed==false)
 end)
+test("do not detach items the game already equipped on respawn",function()
+    local t=fixture();t.tick();t.killed()
+    t.newPawn.EquipedItems={t.item}
+    t.item.PreviousOwner=t.newPawn
+    t.tick(1.5);t.tick()
+    assert(t.item.detached~=true and not t.item.wasMoved,
+        "native equipped items must remain in native inventory")
+end)
+test("do not convert Epic quest artifacts",function()
+    local t=fixture();t.tick()
+    t.loot.bIsQuestObjective=true
+    t.convert()
+    assert(#t.spawned==0 and t.loot._valid~=false)
+end)
+
 print("ALL TESTS PASSED ("..passed..")")
