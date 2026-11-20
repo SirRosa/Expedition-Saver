@@ -26,7 +26,7 @@ jobs:
         run: lua5.4 tests/test_mapper.lua
       - name: Expedition Saver syntax check
         run: luac5.4 -p ue4ss/Mods/ExpeditionSaver/Scripts/main.lua tests/test_expedition.lua
-      - name: Test Expedition Saver 38 gameplay regression cases
+      - name: Test Expedition Saver 40 gameplay regression cases
         run: lua5.4 tests/test_expedition.lua
       - name: Package mapper (read-only diagnostic)
         run: |
