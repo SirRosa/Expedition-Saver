@@ -182,7 +182,7 @@ local S={
     lastHeartbeat=-1000,lastGuard=nil,recoveryRequired=false,
     nextMachineRepair=0,machineRepairAttempts=0,
     dropQueue={},destructionSeen={},dropAttempt=0,
-    deathEvents=0,newPawnEvents=0,rewardEvents=0,rawDeathEvents=0,rawDestroyEvents=0
+    deathEvents=0,newPawnEvents=0,rewardEvents=0,rawDeathEvents=0,rawDestroyEvents=0,heartbeatTicks=1000,machineRepairCycle=1000
 }
 local function backupFile(slot)
     if not CFG.BackupFile then return nil end
@@ -676,8 +676,9 @@ local function repairElevator(ctx)
     if not CFG.EnableNoPermadeath or not S.recoveryRequired then return end
     if ctx.phase==1 or ctx.phase==2 then return end
     local now=os.clock()
-    if now<S.nextMachineRepair or S.machineRepairAttempts>=10 then return end
-    S.nextMachineRepair=now+CFG.RecoveryRetrySeconds
+    S.machineRepairCycle=S.machineRepairCycle+1
+    if S.machineRepairCycle<5 or S.machineRepairAttempts>=10 then return end
+    S.machineRepairCycle=0
     S.machineRepairAttempts=S.machineRepairAttempts+1
     local lift=first("HeldenDungeonElevator")
     local machine=first("HeldenElevatorMachine")
@@ -737,8 +738,9 @@ local function poll()
     local now=os.clock()
     local host=onHost()
     local ctx=host and game()
-    if now-S.lastHeartbeat>=CFG.HeartbeatDiagnosticsSeconds then
-        S.lastHeartbeat=now
+    S.heartbeatTicks=S.heartbeatTicks+1
+    if S.heartbeatTicks>=20 then
+        S.heartbeatTicks=0
         local gs=first("HeldenGameState")
         local gi=first("HeldenGameInstance")
         local save=gi and get(gi,"CurrentSaveGame")
@@ -747,7 +749,14 @@ local function poll()
             " save="..tostring(valid(save))..
             " saveMode="..tostring(enum(get(save,"GameMode")))..
             " phase="..tostring(ctx and ctx.phase)..
-            " deaths="..S.deathEvents.." destructionEvents="..S.rewardEvents)
+            " rawPhase="..tostring(enum(get(get(gs,"CurrentDungeonRun"),"State")))..
+            " flags="..tostring(enum(get(get(gs,"CurrentDungeonRun"),"Flags")))..
+            " expeditionFailed="..tostring(get(gs,"bExpeditionFailed"))..
+            " savedFailed="..tostring(get(get(save,"MetaData"),"bHasFailed"))..
+            " recovery="..tostring(S.recoveryRequired)..
+            " deaths="..S.deathEvents.." rawDeaths="..S.rawDeathEvents..
+            " destructionEvents="..S.rewardEvents..
+            " rawDestructions="..S.rawDestroyEvents)
     end
     if not ctx then
         if S.lastMode~="nonexpedition" then
