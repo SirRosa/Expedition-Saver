@@ -1,14 +1,15 @@
-# Respawn sound (v0.7.5 test build)
+# Respawn sound — v0.7.6 host + client
 
-- **respawn.wav** is converted from the audio file supplied by the user. For distribution, use the complete user-specific install ZIP; the original audio and its WAV conversion are intentionally not committed to the public repository.
-- **respawn_audio.cpp** is the complete source for the tiny Windows helper. The GitHub Actions Windows job builds **respawn_audio.exe** from source. The final installer places the EXE and WAV beside each other in this folder.
-- Playback is initiated **only once after a verified native respawn or successful existing-character revive fallback**.
-- It uses UE4SS `ExecuteAsync` to launch a local, windowless Win64 helper. The child process plays the WAV using `PlaySoundW`, so the 2.7-second playback cannot block the Unreal game thread. It has no network access, registry modifications, or persistence.
-- Default: `EnableRespawnSound = true` in `Scripts/main.lua`. Set to `false` to disable.
-- Sound plays through **Windows' default output device**, independently of Unreal's in-game sound mixer/volume. It is **local**: on a hosted co-op game it plays only for a locally controlled player on the host. It is not replicated to clients.
-- If `ExecuteAsync`, `os.execute`, the EXE or WAV is unavailable, the sound is skipped and respawn logic is unchanged.
-- CI tests simulate the UE4SS API and Windows commands, and Windows Actions compiles the helper; actual audible in-game playback is not verified by CI.
+- The **exact WAV supplied by the user** (`re-zero-return-by-death (1).wav`, 1.886 seconds, 44.1 kHz, 16-bit stereo) replaces the old 2.7-second sound in the downloadable installer. The user's audio asset is not committed to the public GitHub repo; install the complete ZIP.
+- `respawn_audio.cpp` is the complete source for the small Windows WinMM `PlaySoundW` helper. The GitHub Actions Windows job builds `respawn_audio.exe` for x64. Both that EXE and `respawn.wav` are included in the finished installation ZIP.
+- **Install the same ExpeditionSaver mod folder, including the Audio subfolder, on BOTH the host PC and each client PC.** The host retains authoritative respawn/rewards; on clients the audio listener is read-only and does not perform any gameplay mutation.
+- **Host:** plays exactly once on confirmed successful native respawn or existing-pawn revive fallback. Only for the host's local controller.
+- **Client:** watches **only the local controller** for a real living→dead→living transition, including `LastPlayerChar` when `GetPawn()` is nil, same-character revival, and `OnNewPawn` arriving before replicated `LastPlayerChar`. It does not need a server RPC or a server-side audio broadcast.
+- Sound is **not** played on initial spawn, while dead, on simple respawn requests, or on remote players' respawns. There is no duplicate playback on the host; the client listener runs only without a live authoritative GameMode.
+- The sound runs via UE4SS `ExecuteAsync` in a separate source-auditable Windows process (WinMM), not the Unreal game thread. It plays through the **local default Windows output device**, independent of the game's internal volume controls.
+- Config: `EnableRespawnSound = true` in `Scripts/main.lua`. Set `false` to disable. Missing helper/audio/API simply skips playback.
+- GitHub Actions uses mocked UE4SS client and server events (including nil `GetPawn()`) and compiles the Win64 helper. **Actual in-game client and host audio still requires verification on two PCs.**
 
-**Install path**: `Grain Rot/Helden/Binaries/Win64/ue4ss/Mods/ExpeditionSaver/Audio/`.
+**Installation:** extract the complete ZIP to `Grain Rot/Helden/Binaries/Win64/` on EACH PC, preserving `ue4ss/Mods/ExpeditionSaver/Audio/`.
 
-**Important**: GitHub's source-only Lua artifact cannot contain the user-supplied WAV. The final downloadable combined ZIP includes both the compiled EXE and the WAV. Do not install the Lua-only Actions artifact expecting audio to work without both files.
+**Important:** GitHub's code-only Actions artifact does not include the uploaded sound. The complete downloadable installation ZIP supplied in chat includes the correct new WAV and the compiled helper.
